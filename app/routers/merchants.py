@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from app.database import supabase, SECRET_KEY
 from jose import jwt, JWTError
 
-router = APIRouter(prefix="/merchants", tags=["Merchants"])
+router = APIRouter(tags=["Merchants"])
 security = HTTPBearer()
 
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):

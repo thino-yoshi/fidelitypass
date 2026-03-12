@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from app.database import supabase, SECRET_KEY
 from jose import jwt, JWTError
 
-router = APIRouter(prefix="/scan", tags=["Scan"])
+router = APIRouter(tags=["Scan"])
 security = HTTPBearer()
 
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
@@ -22,7 +22,6 @@ def scan_qr(data: ScanRequest, user=Depends(get_current_user)):
     if user["user_type"] != "merchant":
         raise HTTPException(status_code=403, detail="Réservé aux commerçants")
 
-    # Trouver la carte
     res = supabase.table("loyalty_cards").select("*")\
         .eq("qr_token", data.qr_token).execute()
     if not res.data:
@@ -30,11 +29,9 @@ def scan_qr(data: ScanRequest, user=Depends(get_current_user)):
 
     card = res.data[0]
 
-    # Vérifier que la carte appartient à ce commerçant
     if card["merchant_id"] != user["sub"]:
         raise HTTPException(status_code=403, detail="Cette carte n'appartient pas à votre commerce")
 
-    # Récupérer les infos du commerçant
     merchant_res = supabase.table("merchants").select("*")\
         .eq("id", user["sub"]).execute()
     merchant = merchant_res.data[0]
@@ -45,7 +42,6 @@ def scan_qr(data: ScanRequest, user=Depends(get_current_user)):
     if reward_reached:
         new_count = 0
 
-    # Mettre à jour les tampons
     supabase.table("loyalty_cards").update({"stamps_count": new_count})\
         .eq("id", card["id"]).execute()
 
