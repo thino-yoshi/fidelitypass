@@ -1,52 +1,43 @@
-from fastapi import APIRouter, HTTPException, Header
+from fastapi import APIRouter, HTTPException, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from app.database import supabase, SECRET_KEY
 from jose import jwt, JWTError
 import uuid
 
-router = APIRouter()
+router = APIRouter(prefix="/cards", tags=["Cards"])
+security = HTTPBearer()
 
-def get_user_from_token(authorization: str):
+def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     try:
-        token = authorization.replace("Bearer ", "")
-        payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=["HS256"])
         return payload
     except JWTError:
         raise HTTPException(status_code=401, detail="Token invalide")
 
-class CreateCardRequest(BaseModel):
+class CardCreate(BaseModel):
     merchant_id: str
 
 @router.post("/")
-def create_card(data: CreateCardRequest, authorization: str = Header(...)):
-    user = get_user_from_token(authorization)
-    client_id = user["sub"]
-    
-    existing = supabase.table("loyalty_cards").select("id").eq(
-        "client_id", client_id
-    ).eq("merchant_id", data.merchant_id).execute()
-    
+def create_card(data: CardCreate, user=Depends(get_current_user)):
+    if user["user_type"] != "client":
+        raise HTTPException(status_code=403, detail="Réservé aux clients")
+    existing = supabase.table("loyalty_cards").select("*")\
+        .eq("client_id", user["sub"])\
+        .eq("merchant_id", data.merchant_id).execute()
     if existing.data:
-        raise HTTPException(status_code=400, detail="Carte déjà existante pour ce commerce")
-    
+        raise HTTPException(status_code=400, detail="Carte déjà existante")
     qr_token = str(uuid.uuid4())
-    
-    card = supabase.table("loyalty_cards").insert({
-        "client_id": client_id,
+    res = supabase.table("loyalty_cards").insert({
+        "client_id": user["sub"],
         "merchant_id": data.merchant_id,
         "stamps_count": 0,
         "qr_token": qr_token
     }).execute()
-    
-    return card.data[0]
+    return res.data[0]
 
 @router.get("/me")
-def get_my_cards(authorization: str = Header(...)):
-    user = get_user_from_token(authorization)
-    client_id = user["sub"]
-    
-    cards = supabase.table("loyalty_cards").select(
-        "*, merchants(business_name, category, stamps_required, reward_description)"
-    ).eq("client_id", client_id).execute()
-    
-    return cards.data if cards.data else []
+def get_my_cards(user=Depends(get_current_user)):
+    res = supabase.table("loyalty_cards").select("*")\
+        .eq("client_id", user["sub"]).execute()
+    return res.data

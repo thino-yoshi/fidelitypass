@@ -1,34 +1,46 @@
-from fastapi import APIRouter, HTTPException
-from app.database import supabase
+from fastapi import APIRouter, HTTPException, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from pydantic import BaseModel
+from app.database import supabase, SECRET_KEY
+from jose import jwt, JWTError
 
-router = APIRouter()
+router = APIRouter(prefix="/merchants", tags=["Merchants"])
+security = HTTPBearer()
+
+def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    try:
+        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=["HS256"])
+        return payload
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Token invalide")
+
+class MerchantCreate(BaseModel):
+    business_name: str
+    category: str
+    stamps_required: int = 10
+    reward_description: str = ""
 
 @router.get("/")
 def get_merchants():
-    result = supabase.table("merchants").select(
-        "*, users(name, email)"
-    ).execute()
-    
-    if not result.data:
-        return []
-    
-    merchants = []
-    for m in result.data:
-        merchants.append({
-            "id": m["id"],
-            "business_name": m["business_name"],
-            "category": m["category"],
-            "stamps_required": m["stamps_required"],
-            "reward_description": m["reward_description"]
-        })
-    
-    return merchants
+    res = supabase.table("merchants").select("*").execute()
+    return res.data
 
 @router.get("/{merchant_id}")
 def get_merchant(merchant_id: str):
-    result = supabase.table("merchants").select("*").eq("id", merchant_id).execute()
-    
-    if not result.data:
-        raise HTTPException(status_code=404, detail="Commerce introuvable")
-    
-    return result.data[0]
+    res = supabase.table("merchants").select("*").eq("id", merchant_id).execute()
+    if not res.data:
+        raise HTTPException(status_code=404, detail="Commerçant non trouvé")
+    return res.data[0]
+
+@router.post("/setup")
+def setup_merchant(data: MerchantCreate, user=Depends(get_current_user)):
+    if user["user_type"] != "merchant":
+        raise HTTPException(status_code=403, detail="Réservé aux commerçants")
+    res = supabase.table("merchants").insert({
+        "id": user["sub"],
+        "business_name": data.business_name,
+        "category": data.category,
+        "stamps_required": data.stamps_required,
+        "reward_description": data.reward_description
+    }).execute()
+    return res.data[0]
