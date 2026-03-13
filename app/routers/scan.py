@@ -49,7 +49,15 @@ def scan_qr(data: ScanRequest, user=Depends(get_current_user)):
         new_count = 0
 
     supabase.table("loyalty_cards").update({"stamps_count": new_count}).eq("id", card["id"]).execute()
-
+    
+    supabase.table("scan_history").insert({
+        "merchant_id": user["sub"],
+        "client_id": card["client_id"],
+        "card_id": card["id"],
+        "stamps_count": new_count,
+        "reward_reached": reward_reached
+    }).execute()
+    
     return {
         "success": True,
         "stamps_count": new_count,
