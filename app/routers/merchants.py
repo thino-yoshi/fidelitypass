@@ -36,11 +36,26 @@ def get_merchant(merchant_id: str):
 def setup_merchant(data: MerchantCreate, user=Depends(get_current_user)):
     if user["user_type"] != "merchant":
         raise HTTPException(status_code=403, detail="Réservé aux commerçants")
-    res = supabase.table("merchants").insert({
-        "id": user["sub"],
-        "business_name": data.business_name,
-        "category": data.category,
-        "stamps_required": data.stamps_required,
-        "reward_description": data.reward_description
-    }).execute()
+    
+    # Vérifier si le commerçant existe déjà
+    existing = supabase.table("merchants").select("id").eq("id", user["sub"]).execute()
+    
+    if existing.data:
+        # Mettre à jour
+        res = supabase.table("merchants").update({
+            "business_name": data.business_name,
+            "category": data.category,
+            "stamps_required": data.stamps_required,
+            "reward_description": data.reward_description
+        }).eq("id", user["sub"]).execute()
+    else:
+        # Créer
+        res = supabase.table("merchants").insert({
+            "id": user["sub"],
+            "business_name": data.business_name,
+            "category": data.category,
+            "stamps_required": data.stamps_required,
+            "reward_description": data.reward_description
+        }).execute()
+    
     return res.data[0]
