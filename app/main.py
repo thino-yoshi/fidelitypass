@@ -1,6 +1,9 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.routers import auth, merchants, cards, scan
+from app.routers import auth, merchants, cards, scan, notifications
+
+app.include_router(notifications.router, prefix="/notifications", tags=["Notifications"])
 
 app = FastAPI(title="FidelityPass API", version="1.0.0")
 

@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
 // ─── CONFIG API ──────────────────────────────────────────────────────────────
-const API_URL = "http://127.0.0.1:8000";
+const API_URL = "https://fidelitypass-production.up.railway.app";
 
 async function apiFetch(path, options = {}, token = null) {
   const headers = { "Content-Type": "application/json" };
