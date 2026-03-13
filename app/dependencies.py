@@ -12,4 +12,4 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
         payload = jwt.decode(token, secret, algorithms=["HS256"])
         return payload
     except JWTError:
-        raise HTTPException(status_code=401, detail="Token invalide")
+        raise HTTPException(status_code=401, detail="Token invalide")                                                                       
