@@ -56,19 +56,29 @@ def get_dynamic_qr(card_id: str, user=Depends(get_current_user)):
         "exp": datetime.utcnow() + timedelta(seconds=60)
     }
     dynamic_token = jwt.encode(payload, SECRET_KEY, algorithm="HS256")
-    
+
     return {"dynamic_token": dynamic_token, "expires_in": 60}
 
-    @router.get("/scan-history")
-    def get_scan_history(user=Depends(get_current_user)):
-        if user["user_type"] != "merchant":
-            raise HTTPException(status_code=403, detail="Réservé aux commerçants")
-        
-        res = supabase.table("scan_history")\
-            .select("*, users(name, email)")\
-            .eq("merchant_id", user["sub"])\
-            .order("scanned_at", desc=True)\
-            .limit(50)\
+@router.get("/scan-history")
+def get_scan_history(user=Depends(get_current_user)):
+    if user["user_type"] != "merchant":
+        raise HTTPException(status_code=403, detail="Réservé aux commerçants")
+
+    res = supabase.table("scan_history")\
+        .select("*")\
+        .eq("merchant_id", user["sub"])\
+        .order("scanned_at", desc=True)\
+        .limit(50)\
+        .execute()
+
+    results = []
+    for scan in res.data:
+        client_res = supabase.table("users")\
+            .select("name, email")\
+            .eq("id", scan["client_id"])\
             .execute()
-        
-        return res.data
+        client = client_res.data[0] if client_res.data else {}
+        scan["users"] = client
+        results.append(scan)
+
+    return results
