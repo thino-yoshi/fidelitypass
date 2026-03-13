@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from app.database import supabase, SECRET_KEY
 from jose import jwt, JWTError
 import uuid
+from datetime import datetime, timedelta
 
 router = APIRouter(tags=["Cards"])
 security = HTTPBearer()
@@ -40,3 +41,19 @@ def get_my_cards(user=Depends(get_current_user)):
         "*, merchants(business_name, category, stamps_required, reward_description)"
     ).eq("client_id", client_id).execute()
     return cards.data if cards.data else []
+
+@router.get("/qr/{card_id}")
+def get_dynamic_qr(card_id: str, user=Depends(get_current_user)):
+    # Vérifier que la carte appartient bien à ce client
+    card = supabase.table("loyalty_cards").select("*").eq("id", card_id).eq("client_id", user["sub"]).execute()
+    if not card.data:
+        raise HTTPException(status_code=404, detail="Carte non trouvée")
+    
+    # Générer un token JWT qui expire dans 60s
+    payload = {
+        "qr_token": card.data[0]["qr_token"],
+        "card_id": card_id,
+        "exp": datetime.utcnow() + timedelta(seconds=60)
+    }
+    dynamic_token = jwt.encode(payload, SECRET_KEY, algorithm="HS256")
+    return {"dynamic_token": dynamic_token, "expires_in": 60}
