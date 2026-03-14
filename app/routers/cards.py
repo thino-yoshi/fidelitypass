@@ -82,3 +82,37 @@ def get_scan_history(user=Depends(get_current_user)):
         results.append(scan)
 
     return results
+
+@router.get("/stats")
+def get_merchant_stats(user=Depends(get_current_user)):
+    if user["user_type"] != "merchant":
+        raise HTTPException(status_code=403, detail="Réservé aux commerçants")
+
+    cards_res = supabase.table("loyalty_cards")\
+        .select("*")\
+        .eq("merchant_id", user["sub"])\
+        .execute()
+
+    cards = cards_res.data
+    total_clients = len(cards)
+    total_stamps = sum(c["stamps_count"] for c in cards)
+
+    rewards_res = supabase.table("scan_history")\
+        .select("id")\
+        .eq("merchant_id", user["sub"])\
+        .eq("reward_reached", True)\
+        .execute()
+    total_rewards = len(rewards_res.data)
+
+    scans_res = supabase.table("scan_history")\
+        .select("id")\
+        .eq("merchant_id", user["sub"])\
+        .execute()
+    total_scans = len(scans_res.data)
+
+    return {
+        "total_clients": total_clients,
+        "total_stamps": total_stamps,
+        "total_rewards": total_rewards,
+        "total_scans": total_scans,
+    }
