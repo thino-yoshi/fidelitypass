@@ -1,10 +1,13 @@
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from app.database import supabase, SECRET_KEY
 from jose import jwt, JWTError
 import uuid
-from datetime import datetime, timedelta
+import csv
+import io
+from datetime import datetime, timedelta, timezone
 
 router = APIRouter(tags=["Cards"])
 security = HTTPBearer()
@@ -214,6 +217,72 @@ def adjust_stamp(card_id: str, data: AdjustStampRequest, user=Depends(get_curren
         "stamps_required": stamps_required,
         "reward_reached": reward_reached,
     }
+
+
+@router.get("/export-csv")
+def export_clients_csv(user=Depends(get_current_user)):
+    if user["user_type"] != "merchant":
+        raise HTTPException(status_code=403, detail="Réservé aux commerçants")
+
+    merchant_res = supabase.table("merchants").select("stamps_required").eq("id", user["sub"]).execute()
+    stamps_required = merchant_res.data[0]["stamps_required"] if merchant_res.data else 10
+
+    cards_res = supabase.table("loyalty_cards").select("*").eq("merchant_id", user["sub"]).execute()
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Nom", "Email", "Tampons", "Tampons requis", "Tampons restants", "Date inscription"])
+
+    for card in cards_res.data:
+        client_res = supabase.table("users").select("name, email").eq("id", card["client_id"]).execute()
+        client = client_res.data[0] if client_res.data else {}
+        stamps = card["stamps_count"]
+        created = card.get("created_at", "")[:10] if card.get("created_at") else ""
+        writer.writerow([
+            client.get("name", ""),
+            client.get("email", ""),
+            stamps,
+            stamps_required,
+            max(0, stamps_required - stamps),
+            created,
+        ])
+
+    output.seek(0)
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=clients.csv"},
+    )
+
+
+@router.get("/stats/daily")
+def get_daily_stats(user=Depends(get_current_user)):
+    if user["user_type"] != "merchant":
+        raise HTTPException(status_code=403, detail="Réservé aux commerçants")
+
+    since = (datetime.now(timezone.utc) - timedelta(days=29)).isoformat()
+    res = supabase.table("scan_history")\
+        .select("scanned_at, reward_reached")\
+        .eq("merchant_id", user["sub"])\
+        .gte("scanned_at", since)\
+        .execute()
+
+    daily = {}
+    for scan in res.data:
+        day = scan["scanned_at"][:10]
+        if day not in daily:
+            daily[day] = {"scans": 0, "rewards": 0}
+        daily[day]["scans"] += 1
+        if scan.get("reward_reached"):
+            daily[day]["rewards"] += 1
+
+    result = []
+    for i in range(30):
+        day = (datetime.now(timezone.utc) - timedelta(days=29 - i)).strftime("%Y-%m-%d")
+        d = daily.get(day, {"scans": 0, "rewards": 0})
+        result.append({"date": day, "scans": d["scans"], "rewards": d["rewards"]})
+
+    return result
 
 
 @router.get("/stats")
