@@ -20,7 +20,14 @@ if not firebase_admin._apps:
         firebase_admin.initialize_app(cred)
 
 
-def _send_fcm_to_clients(title: str, message: str, client_ids: list, merchant_id: str, notif_type: str = "promo") -> int:
+def _send_fcm_to_clients(
+    title: str,
+    message: str,
+    client_ids: list,
+    merchant_id: str,
+    merchant_name: str,
+    notif_type: str = "promo",
+) -> int:
     """Envoie une notification FCM à une liste de client_ids. Retourne le nb de succès."""
     if not client_ids:
         return 0
@@ -42,6 +49,26 @@ def _send_fcm_to_clients(title: str, message: str, client_ids: list, merchant_id
             sent += 1
         except Exception as e:
             print(f"❌ FCM error: {e}")
+
+    # Batch insert into client_notifications for all target clients
+    try:
+        records = [
+            {
+                "client_id": client_id,
+                "merchant_id": merchant_id,
+                "merchant_name": merchant_name,
+                "title": title,
+                "body": message,
+                "type": notif_type,
+                "read": False,
+            }
+            for client_id in client_ids
+        ]
+        if records:
+            supabase.table("client_notifications").insert(records).execute()
+    except Exception as e:
+        print(f"❌ Erreur insertion client_notifications (batch): {e}")
+
     return sent
 
 
@@ -56,6 +83,9 @@ async def send_notification(data: NotificationPayload, user=Depends(get_current_
     if user["user_type"] != "merchant":
         raise HTTPException(status_code=403, detail="Réservé aux commerçants")
 
+    merchant_res = supabase.table("merchants").select("business_name").eq("id", user["sub"]).execute()
+    merchant_name = merchant_res.data[0]["business_name"] if merchant_res.data else ""
+
     cards = supabase.table("loyalty_cards")\
         .select("client_id")\
         .eq("merchant_id", user["sub"])\
@@ -65,7 +95,7 @@ async def send_notification(data: NotificationPayload, user=Depends(get_current_
         return {"sent": 0, "message": "Aucun client à notifier"}
 
     client_ids = [c["client_id"] for c in cards.data]
-    sent = _send_fcm_to_clients(data.title, data.message, client_ids, user["sub"], "promo")
+    sent = _send_fcm_to_clients(data.title, data.message, client_ids, user["sub"], merchant_name, "promo")
     return {"sent": sent, "message": f"{sent} notification(s) envoyée(s)"}
 
 
@@ -82,7 +112,8 @@ async def send_targeted_notification(data: TargetedNotificationPayload, user=Dep
     if user["user_type"] != "merchant":
         raise HTTPException(status_code=403, detail="Réservé aux commerçants")
 
-    merchant_res = supabase.table("merchants").select("stamps_required").eq("id", user["sub"]).execute()
+    merchant_res = supabase.table("merchants").select("business_name, stamps_required").eq("id", user["sub"]).execute()
+    merchant_name = merchant_res.data[0]["business_name"] if merchant_res.data else ""
     stamps_required = merchant_res.data[0]["stamps_required"] if merchant_res.data else 10
 
     cards_res = supabase.table("loyalty_cards").select("*").eq("merchant_id", user["sub"]).execute()
@@ -110,7 +141,7 @@ async def send_targeted_notification(data: TargetedNotificationPayload, user=Dep
     if not target_client_ids:
         return {"sent": 0, "message": "Aucun client correspond aux critères"}
 
-    sent = _send_fcm_to_clients(data.title, data.message, target_client_ids, user["sub"], "targeted")
+    sent = _send_fcm_to_clients(data.title, data.message, target_client_ids, user["sub"], merchant_name, "targeted")
     return {"sent": sent, "total_targeted": len(target_client_ids), "message": f"{sent}/{len(target_client_ids)} notification(s) envoyée(s)"}
 
 
@@ -189,6 +220,31 @@ async def cancel_scheduled(notif_id: str, user=Depends(get_current_user)):
     return {"message": "Notification annulée"}
 
 
+# ── Notifications client ───────────────────────────────────────────────────────
+
+@router.get("/client")
+async def get_client_notifications(user=Depends(get_current_user)):
+    """Retourne les notifications du client connecté, les plus récentes en premier."""
+    res = supabase.table("client_notifications")\
+        .select("*")\
+        .eq("client_id", user["sub"])\
+        .order("created_at", desc=True)\
+        .limit(50)\
+        .execute()
+    return res.data
+
+
+@router.put("/client/read-all")
+async def mark_all_client_notifications_read(user=Depends(get_current_user)):
+    """Marque toutes les notifications non lues du client connecté comme lues."""
+    supabase.table("client_notifications")\
+        .update({"read": True})\
+        .eq("client_id", user["sub"])\
+        .eq("read", False)\
+        .execute()
+    return {"message": "ok"}
+
+
 # ── Job APScheduler (appelé depuis main.py) ───────────────────────────────────
 
 def send_due_notifications():
@@ -208,6 +264,10 @@ def send_due_notifications():
             filter_type = notif.get("filter_type", "broadcast")
             filter_value = notif.get("filter_value")
 
+            # Récupérer le nom du commerçant
+            merchant_res = supabase.table("merchants").select("business_name, stamps_required").eq("id", merchant_id).execute()
+            merchant_name = merchant_res.data[0]["business_name"] if merchant_res.data else ""
+
             # Récupérer les clients cibles
             cards_res = supabase.table("loyalty_cards")\
                 .select("client_id, stamps_count")\
@@ -218,7 +278,6 @@ def send_due_notifications():
             if filter_type == "broadcast":
                 client_ids = [c["client_id"] for c in cards_res.data]
             elif filter_type == "stamps" and filter_value is not None:
-                merchant_res = supabase.table("merchants").select("stamps_required").eq("id", merchant_id).execute()
                 stamps_req = merchant_res.data[0]["stamps_required"] if merchant_res.data else 10
                 for card in cards_res.data:
                     if (stamps_req - card["stamps_count"]) <= filter_value:
@@ -235,7 +294,7 @@ def send_due_notifications():
                     if not last_scan.data:
                         client_ids.append(card["client_id"])
 
-            sent = _send_fcm_to_clients(title, message, client_ids, merchant_id, "scheduled")
+            sent = _send_fcm_to_clients(title, message, client_ids, merchant_id, merchant_name, "scheduled")
             print(f"✅ Scheduled notif {notif['id']}: {sent} envoyée(s)")
 
             # Marquer comme envoyée

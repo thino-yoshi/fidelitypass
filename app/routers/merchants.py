@@ -21,6 +21,10 @@ class MerchantCreate(BaseModel):
     stamps_required: int = 10
     reward_description: str = ""
 
+class RewardPayload(BaseModel):
+    stamps_required: int
+    description: str
+
 @router.get("/")
 def get_merchants():
     res = supabase.table("merchants").select("*").execute()
@@ -77,3 +81,55 @@ def get_static_qr(user=Depends(get_current_user)):
         supabase.table("merchants").update({"static_qr_token": token}).eq("id", user["sub"]).execute()
 
     return {"static_qr_token": token}
+
+
+@router.get("/me/rewards")
+def get_merchant_rewards(user=Depends(get_current_user)):
+    if user["user_type"] != "merchant":
+        raise HTTPException(status_code=403, detail="Réservé aux commerçants")
+
+    res = supabase.table("merchant_rewards").select("*").eq("merchant_id", user["sub"]).order("stamps_required").execute()
+    return res.data
+
+
+@router.post("/me/rewards")
+def create_merchant_reward(data: RewardPayload, user=Depends(get_current_user)):
+    if user["user_type"] != "merchant":
+        raise HTTPException(status_code=403, detail="Réservé aux commerçants")
+
+    if data.stamps_required <= 0:
+        raise HTTPException(status_code=400, detail="stamps_required doit être supérieur à 0")
+
+    if not data.description.strip():
+        raise HTTPException(status_code=400, detail="La description ne peut pas être vide")
+
+    existing = supabase.table("merchant_rewards").select("id", "stamps_required").eq("merchant_id", user["sub"]).execute()
+
+    if len(existing.data) >= 5:
+        raise HTTPException(status_code=400, detail="Vous ne pouvez pas avoir plus de 5 récompenses")
+
+    used_stamps = [r["stamps_required"] for r in existing.data]
+    if data.stamps_required in used_stamps:
+        raise HTTPException(status_code=400, detail="Une récompense avec ce nombre de tampons existe déjà")
+
+    res = supabase.table("merchant_rewards").insert({
+        "merchant_id": user["sub"],
+        "stamps_required": data.stamps_required,
+        "description": data.description.strip()
+    }).execute()
+
+    return res.data[0]
+
+
+@router.delete("/me/rewards/{reward_id}")
+def delete_merchant_reward(reward_id: str, user=Depends(get_current_user)):
+    if user["user_type"] != "merchant":
+        raise HTTPException(status_code=403, detail="Réservé aux commerçants")
+
+    existing = supabase.table("merchant_rewards").select("id").eq("id", reward_id).eq("merchant_id", user["sub"]).execute()
+    if not existing.data:
+        raise HTTPException(status_code=404, detail="Récompense non trouvée")
+
+    supabase.table("merchant_rewards").delete().eq("id", reward_id).execute()
+
+    return {"message": "Récompense supprimée"}

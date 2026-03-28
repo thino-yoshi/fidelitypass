@@ -49,7 +49,7 @@ def scan_qr(data: ScanRequest, user=Depends(get_current_user)):
         new_count = 0
 
     supabase.table("loyalty_cards").update({"stamps_count": new_count}).eq("id", card["id"]).execute()
-    
+
     supabase.table("scan_history").insert({
         "merchant_id": user["sub"],
         "client_id": card["client_id"],
@@ -57,7 +57,31 @@ def scan_qr(data: ScanRequest, user=Depends(get_current_user)):
         "stamps_count": new_count,
         "reward_reached": reward_reached
     }).execute()
-    
+
+    # Insert client notification
+    if reward_reached:
+        notif_type = "recompense"
+        notif_title = "🎉 Récompense débloquée !"
+        notif_body = f"Bravo ! Tu as gagné ta récompense chez {merchant['business_name']}."
+    else:
+        remaining = merchant["stamps_required"] - new_count
+        notif_type = "tampon"
+        notif_title = "✓ Tampon ajouté !"
+        notif_body = f"{new_count}/{merchant['stamps_required']} tampons. Plus que {remaining} pour ta récompense !"
+
+    try:
+        supabase.table("client_notifications").insert({
+            "client_id": card["client_id"],
+            "merchant_id": user["sub"],
+            "merchant_name": merchant["business_name"],
+            "title": notif_title,
+            "body": notif_body,
+            "type": notif_type,
+            "read": False,
+        }).execute()
+    except Exception as e:
+        print(f"❌ Erreur insertion client_notifications: {e}")
+
     return {
         "success": True,
         "stamps_count": new_count,
