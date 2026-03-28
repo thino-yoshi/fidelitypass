@@ -1,8 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from pydantic import BaseModel
 from app.dependencies import get_current_user
 from app.database import supabase
 import bcrypt
+import time
 
 router = APIRouter(tags=["Users"])
 
@@ -64,3 +65,65 @@ def delete_account(data: DeleteAccountRequest, user=Depends(get_current_user)):
     supabase.table("users").delete().eq("id", user["sub"]).execute()
 
     return {"message": "Compte supprimé"}
+
+
+# NOTE: The Supabase Storage bucket "avatars" must exist and be set to PUBLIC
+#       before this endpoint will work. Create it in the Supabase dashboard:
+#       Storage → New bucket → name: "avatars" → toggle Public on.
+#
+# NOTE: The "users" table must have a column:  profile_picture_url TEXT
+#       Run in Supabase SQL editor:
+#       ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_picture_url TEXT;
+
+@router.post("/profile-picture")
+async def upload_profile_picture(
+    file: UploadFile = File(...),
+    current_user=Depends(get_current_user)
+):
+    """Upload a profile picture — stores in Supabase Storage bucket 'avatars'."""
+    user_id = current_user["sub"]
+    contents = await file.read()
+    content_type = file.content_type or "image/jpeg"
+    ext = "png" if content_type == "image/png" else "jpg"
+    filename = f"{user_id}.{ext}"
+
+    # Supprimer l'ancien fichier s'il existe (ignore erreur si absent)
+    try:
+        supabase.storage.from_("avatars").remove([filename])
+    except Exception:
+        pass
+
+    # Upload du nouveau fichier
+    try:
+        supabase.storage.from_("avatars").upload(
+            path=filename,
+            file=contents,
+            file_options={"content-type": content_type, "cache-control": "3600", "upsert": "true"}
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur storage upload: {str(e)}")
+
+    # URL publique avec cache-buster
+    raw_url = supabase.storage.from_("avatars").get_public_url(filename)
+    public_url = f"{raw_url}?v={int(time.time())}"
+
+    # Mise à jour en base
+    db_res = supabase.table("users").update(
+        {"profile_picture_url": public_url}
+    ).eq("id", user_id).execute()
+
+    if not db_res.data:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Fichier uploadé mais update DB échoué (user_id={user_id})"
+        )
+
+    return {"profile_picture_url": public_url}
+
+
+@router.get("/me")
+async def get_me(current_user=Depends(get_current_user)):
+    """Get the current user's profile, including profile_picture_url."""
+    user_id = current_user["sub"]
+    result = supabase.table("users").select("id, name, email, role, profile_picture_url").eq("id", user_id).single().execute()
+    return result.data
