@@ -161,7 +161,7 @@ def get_merchant_clients(user=Depends(get_current_user)):
     results = []
     for card in cards_res.data:
         client_res = supabase.table("users")\
-            .select("name, email")\
+            .select("name, email, profile_picture_url")\
             .eq("id", card["client_id"])\
             .execute()
         client = client_res.data[0] if client_res.data else {}
