@@ -1,9 +1,20 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import auth, merchants, cards, scan, notifications
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from app.routers import auth, merchants, cards, scan, notifications, users
+from app.routers.notifications import send_due_notifications
 
-app = FastAPI(title="FidelityPass API", version="1.0.0")
+scheduler = AsyncIOScheduler()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    scheduler.add_job(send_due_notifications, "interval", minutes=1, id="notif_scheduler")
+    scheduler.start()
+    yield
+    scheduler.shutdown()
+
+app = FastAPI(title="FidelityPass API", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
