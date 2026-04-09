@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from app.database import supabase, SECRET_KEY
@@ -26,8 +26,8 @@ class RewardPayload(BaseModel):
     description: str
 
 @router.get("/")
-def get_merchants():
-    res = supabase.table("merchants").select("*").execute()
+def get_merchants(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)):
+    res = supabase.table("merchants").select("*").range(offset, offset + limit - 1).execute()
     return res.data
 
 @router.get("/{merchant_id}")

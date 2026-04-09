@@ -225,6 +225,8 @@ async def cancel_scheduled(notif_id: str, user=Depends(get_current_user)):
 @router.get("/client")
 async def get_client_notifications(user=Depends(get_current_user)):
     """Retourne les notifications du client connecté, les plus récentes en premier."""
+    if user["user_type"] != "client":
+        raise HTTPException(status_code=403, detail="Réservé aux clients")
     res = supabase.table("client_notifications")\
         .select("*")\
         .eq("client_id", user["sub"])\
@@ -237,6 +239,8 @@ async def get_client_notifications(user=Depends(get_current_user)):
 @router.put("/client/read-all")
 async def mark_all_client_notifications_read(user=Depends(get_current_user)):
     """Marque toutes les notifications non lues du client connecté comme lues."""
+    if user["user_type"] != "client":
+        raise HTTPException(status_code=403, detail="Réservé aux clients")
     supabase.table("client_notifications")\
         .update({"read": True})\
         .eq("client_id", user["sub"])\

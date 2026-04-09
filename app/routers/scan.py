@@ -1,8 +1,12 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from app.database import supabase, SECRET_KEY
+from app.main import limiter
+from app.logger import get_logger
 from jose import jwt, JWTError
+
+logger = get_logger("scan")
 
 router = APIRouter(tags=["Scan"])
 security = HTTPBearer()
@@ -18,7 +22,8 @@ class ScanRequest(BaseModel):
     qr_token: str
 
 @router.post("/")
-def scan_qr(data: ScanRequest, user=Depends(get_current_user)):
+@limiter.limit("60/minute")
+def scan_qr(request: Request, data: ScanRequest, user=Depends(get_current_user)):
     if user["user_type"] != "merchant":
         raise HTTPException(status_code=403, detail="Réservé aux commerçants")
 
@@ -81,6 +86,11 @@ def scan_qr(data: ScanRequest, user=Depends(get_current_user)):
         }).execute()
     except Exception as e:
         print(f"❌ Erreur insertion client_notifications: {e}")
+
+    if reward_reached:
+        logger.info(f"REWARD merchant={user['sub']} client={card['client_id']} card={card['id']}")
+    else:
+        logger.info(f"SCAN merchant={user['sub']} client={card['client_id']} stamps={new_count}/{merchant['stamps_required']}")
 
     return {
         "success": True,

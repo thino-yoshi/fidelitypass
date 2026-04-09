@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -75,11 +75,11 @@ def create_card(data: CreateCardRequest, user=Depends(get_current_user)):
     return card.data[0]
 
 @router.get("/me")
-def get_my_cards(user=Depends(get_current_user)):
+def get_my_cards(user=Depends(get_current_user), limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)):
     client_id = user["sub"]
     cards = supabase.table("loyalty_cards").select(
         "*, merchants(business_name, category, stamps_required, reward_description)"
-    ).eq("client_id", client_id).execute()
+    ).eq("client_id", client_id).range(offset, offset + limit - 1).execute()
     return cards.data if cards.data else []
 
 @router.get("/qr/{card_id}")
@@ -143,19 +143,20 @@ def get_scan_history(user=Depends(get_current_user)):
             .eq("id", scan["client_id"])\
             .execute()
         client = client_res.data[0] if client_res.data else {}
-        scan["users"] = client
+        scan["client"] = client
         results.append(scan)
 
     return results
 
 @router.get("/clients")
-def get_merchant_clients(user=Depends(get_current_user)):
+def get_merchant_clients(user=Depends(get_current_user), limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)):
     if user["user_type"] != "merchant":
         raise HTTPException(status_code=403, detail="Réservé aux commerçants")
 
     cards_res = supabase.table("loyalty_cards")\
         .select("*")\
         .eq("merchant_id", user["sub"])\
+        .range(offset, offset + limit - 1)\
         .execute()
 
     results = []
@@ -165,7 +166,7 @@ def get_merchant_clients(user=Depends(get_current_user)):
             .eq("id", card["client_id"])\
             .execute()
         client = client_res.data[0] if client_res.data else {}
-        card["users"] = client
+        card["client"] = client
         results.append(card)
 
     return results

@@ -1,6 +1,8 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from app.database import supabase, SECRET_KEY
+from app.main import limiter
+from app.logger import get_logger
 import bcrypt
 import uuid
 from jose import jwt
@@ -9,6 +11,10 @@ from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
 import secrets
 import string
+import os
+
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+logger = get_logger("auth")
 
 router = APIRouter()
 
@@ -42,7 +48,8 @@ def create_token(user_id: str, user_type: str):
     return jwt.encode(payload, SECRET_KEY, algorithm="HS256")
 
 @router.post("/register")
-def register(data: RegisterRequest):
+@limiter.limit("10/minute")
+def register(request: Request, data: RegisterRequest):
     existing = supabase.table("users").select("id").eq("email", data.email).execute()
     if existing.data:
         raise HTTPException(status_code=400, detail="Email déjà utilisé")
@@ -81,11 +88,12 @@ def register(data: RegisterRequest):
             .execute()
 
     token = create_token(user_id, data.user_type)
-
+    logger.info(f"REGISTER email={data.email} user_type={data.user_type}")
     return {"token": token, "user_type": data.user_type, "name": data.name}
 
 @router.post("/login")
-def login(data: LoginRequest):
+@limiter.limit("10/minute")
+def login(request: Request, data: LoginRequest):
     user = supabase.table("users").select("*").eq("email", data.email).execute()
 
     if not user.data:
@@ -97,15 +105,19 @@ def login(data: LoginRequest):
         raise HTTPException(status_code=401, detail="Email ou mot de passe incorrect")
 
     token = create_token(user_data["id"], user_data["user_type"])
-
+    logger.info(f"LOGIN email={data.email} user_type={user_data['user_type']}")
     return {"token": token, "user_type": user_data["user_type"], "name": user_data["name"]}
 
 @router.post("/google")
-def google_login(data: GoogleAuthRequest):
+@limiter.limit("10/minute")
+def google_login(request: Request, data: GoogleAuthRequest):
+    if not GOOGLE_CLIENT_ID:
+        raise HTTPException(status_code=503, detail="Connexion Google non configurée sur ce serveur")
     try:
         idinfo = id_token.verify_oauth2_token(
             data.id_token,
             google_requests.Request(),
+            audience=GOOGLE_CLIENT_ID,
         )
 
         email = idinfo['email']
@@ -140,7 +152,8 @@ def google_login(data: GoogleAuthRequest):
         raise HTTPException(status_code=401, detail=f"Token Google invalide: {str(e)}")
 
 @router.post("/generate-merchant-code")
-def generate_merchant_code(data: MerchantCodeRequest):
+@limiter.limit("5/minute")
+def generate_merchant_code(request: Request, data: MerchantCodeRequest):
     alphabet = string.ascii_uppercase + string.digits
     code = ''.join(secrets.choice(alphabet) for _ in range(8))
 
