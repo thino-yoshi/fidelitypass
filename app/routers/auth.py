@@ -111,13 +111,10 @@ def login(request: Request, data: LoginRequest):
 @router.post("/google")
 @limiter.limit("10/minute")
 def google_login(request: Request, data: GoogleAuthRequest):
-    if not GOOGLE_CLIENT_ID:
-        raise HTTPException(status_code=503, detail="Connexion Google non configurée sur ce serveur")
     try:
         idinfo = id_token.verify_oauth2_token(
             data.id_token,
             google_requests.Request(),
-            audience=GOOGLE_CLIENT_ID,
         )
 
         email = idinfo['email']
