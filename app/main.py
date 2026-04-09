@@ -4,16 +4,14 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
+from app.limiter import limiter
 from app.routers import auth, merchants, cards, scan, notifications, users
 from app.routers.notifications import send_due_notifications
 from app.logger import get_logger
 
 logger = get_logger("api")
-
-limiter = Limiter(key_func=get_remote_address)
 
 scheduler = AsyncIOScheduler()
 

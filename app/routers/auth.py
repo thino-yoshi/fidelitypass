@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from app.database import supabase, SECRET_KEY
-from app.main import limiter
+from app.limiter import limiter
 from app.logger import get_logger
 import bcrypt
 import uuid

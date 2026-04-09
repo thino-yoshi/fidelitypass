@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from app.database import supabase, SECRET_KEY
-from app.main import limiter
+from app.limiter import limiter
 from app.logger import get_logger
 from jose import jwt, JWTError
 
