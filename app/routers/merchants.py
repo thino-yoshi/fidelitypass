@@ -20,6 +20,9 @@ class MerchantCreate(BaseModel):
     category: str
     stamps_required: int = 10
     reward_description: str = ""
+    program_type: str = "stamps"
+    points_per_euro: int = 10
+    points_required: int = 100
 
 class RewardPayload(BaseModel):
     stamps_required: int
@@ -45,23 +48,22 @@ def setup_merchant(data: MerchantCreate, user=Depends(get_current_user)):
     # Vérifier si le commerçant existe déjà
     existing = supabase.table("merchants").select("id").eq("id", user["sub"]).execute()
     
+    fields = {
+        "business_name": data.business_name,
+        "category": data.category,
+        "stamps_required": data.stamps_required,
+        "reward_description": data.reward_description,
+        "program_type": data.program_type,
+        "points_per_euro": data.points_per_euro,
+        "points_required": data.points_required,
+    }
+
     if existing.data:
         # Mettre à jour
-        res = supabase.table("merchants").update({
-            "business_name": data.business_name,
-            "category": data.category,
-            "stamps_required": data.stamps_required,
-            "reward_description": data.reward_description
-        }).eq("id", user["sub"]).execute()
+        res = supabase.table("merchants").update(fields).eq("id", user["sub"]).execute()
     else:
         # Créer
-        res = supabase.table("merchants").insert({
-            "id": user["sub"],
-            "business_name": data.business_name,
-            "category": data.category,
-            "stamps_required": data.stamps_required,
-            "reward_description": data.reward_description
-        }).execute()
+        res = supabase.table("merchants").insert({"id": user["sub"], **fields}).execute()
 
     return res.data[0]
 

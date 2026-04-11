@@ -78,7 +78,7 @@ def create_card(data: CreateCardRequest, user=Depends(get_current_user)):
 def get_my_cards(user=Depends(get_current_user), limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)):
     client_id = user["sub"]
     cards = supabase.table("loyalty_cards").select(
-        "*, merchants(business_name, category, stamps_required, reward_description)"
+        "*, merchants(business_name, category, stamps_required, reward_description, program_type, points_per_euro, points_required)"
     ).eq("client_id", client_id).range(offset, offset + limit - 1).execute()
     return cards.data if cards.data else []
 

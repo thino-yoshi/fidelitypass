@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
+from typing import Optional
 from app.database import supabase, SECRET_KEY
 from app.limiter import limiter
 from app.logger import get_logger
@@ -20,6 +21,7 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
 
 class ScanRequest(BaseModel):
     qr_token: str
+    amount: Optional[float] = None
 
 @router.post("/")
 @limiter.limit("60/minute")
@@ -48,6 +50,71 @@ def scan_qr(request: Request, data: ScanRequest, user=Depends(get_current_user))
     merchant_res = supabase.table("merchants").select("*").eq("id", user["sub"]).execute()
     merchant = merchant_res.data[0]
 
+    program_type = merchant.get("program_type", "stamps")
+
+    # ── Mode Points ────────────────────────────────────────────────────────────
+    if program_type == "points":
+        if data.amount is None or data.amount <= 0:
+            raise HTTPException(status_code=400, detail="Le montant de l'achat est requis pour un programme par points")
+
+        points_per_euro = merchant.get("points_per_euro") or 10
+        points_required = merchant.get("points_required") or 100
+        points_added = round(data.amount * points_per_euro)
+        current_points = card.get("points_count") or 0
+        new_points = current_points + points_added
+
+        reward_reached = new_points >= points_required
+        if reward_reached:
+            new_points = 0
+
+        supabase.table("loyalty_cards").update({"points_count": new_points}).eq("id", card["id"]).execute()
+
+        supabase.table("scan_history").insert({
+            "merchant_id": user["sub"],
+            "client_id": card["client_id"],
+            "card_id": card["id"],
+            "stamps_count": new_points,
+            "reward_reached": reward_reached,
+        }).execute()
+
+        if reward_reached:
+            notif_title = "🎉 Récompense débloquée !"
+            notif_body = f"Bravo ! Tu as gagné ta récompense chez {merchant['business_name']}."
+            notif_type = "recompense"
+        else:
+            remaining = points_required - new_points
+            notif_title = "⭐ Points ajoutés !"
+            notif_body = f"+{points_added} pts · {new_points}/{points_required} points. Plus que {remaining} pour ta récompense !"
+            notif_type = "points"
+
+        try:
+            supabase.table("client_notifications").insert({
+                "client_id": card["client_id"],
+                "merchant_id": user["sub"],
+                "merchant_name": merchant["business_name"],
+                "title": notif_title,
+                "body": notif_body,
+                "type": notif_type,
+                "read": False,
+            }).execute()
+        except Exception as e:
+            print(f"❌ Erreur insertion client_notifications: {e}")
+
+        if reward_reached:
+            logger.info(f"REWARD(pts) merchant={user['sub']} client={card['client_id']} added={points_added}")
+        else:
+            logger.info(f"SCAN(pts) merchant={user['sub']} client={card['client_id']} points={new_points}/{points_required}")
+
+        return {
+            "success": True,
+            "points_count": new_points,
+            "points_required": points_required,
+            "points_added": points_added,
+            "reward_reached": reward_reached,
+            "message": "🎉 Récompense débloquée !" if reward_reached else f"+{points_added} pts ! {new_points}/{points_required}",
+        }
+
+    # ── Mode Tampons (défaut) ──────────────────────────────────────────────────
     new_count = card["stamps_count"] + 1
     reward_reached = new_count >= merchant["stamps_required"]
     if reward_reached:
@@ -63,7 +130,6 @@ def scan_qr(request: Request, data: ScanRequest, user=Depends(get_current_user))
         "reward_reached": reward_reached
     }).execute()
 
-    # Insert client notification
     if reward_reached:
         notif_type = "recompense"
         notif_title = "🎉 Récompense débloquée !"
@@ -97,5 +163,5 @@ def scan_qr(request: Request, data: ScanRequest, user=Depends(get_current_user))
         "stamps_count": new_count,
         "stamps_required": merchant["stamps_required"],
         "reward_reached": reward_reached,
-        "message": "🎉 Récompense débloquée !" if reward_reached else f"Tampon ajouté ! {new_count}/{merchant['stamps_required']}"
+        "message": "🎉 Récompense débloquée !" if reward_reached else f"Tampon ajouté ! {new_count}/{merchant['stamps_required']}",
     }
