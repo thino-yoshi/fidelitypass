@@ -142,7 +142,9 @@ def google_login(request: Request, data: GoogleAuthRequest):
         return {
             "token": token,
             "user_type": user["user_type"],
-            "name": user["name"]
+            "name": user["name"],
+            "email": user["email"],
+            "is_google": True
         }
 
     except Exception as e:

@@ -17,6 +17,10 @@ class ChangePasswordRequest(BaseModel):
 class DeleteAccountRequest(BaseModel):
     password: str
 
+class UpdateProfileRequest(BaseModel):
+    name: str | None = None
+    email: str | None = None
+
 @router.put("/fcm-token")
 def update_fcm_token(data: FCMTokenUpdate, user=Depends(get_current_user)):
     supabase.table("users")\
@@ -123,14 +127,37 @@ async def upload_profile_picture(
 
 @router.get("/me")
 async def get_me(current_user=Depends(get_current_user)):
-    """Get the current user's profile, including profile_picture_url."""
+    """Get the current user's profile, including profile_picture_url and is_google."""
     user_id = current_user["sub"]
     try:
-        result = supabase.table("users").select("id, name, email, role, profile_picture_url").eq("id", user_id).execute()
+        result = supabase.table("users").select("id, name, email, role, profile_picture_url, password_hash").eq("id", user_id).execute()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erreur base de données: {str(e)}")
 
     if not result.data:
         raise HTTPException(status_code=404, detail="Utilisateur non trouvé")
 
-    return result.data[0]
+    user = result.data[0]
+    user["is_google"] = user.pop("password_hash", "") == "google_oauth"
+    return user
+
+@router.patch("/me")
+async def update_profile(data: UpdateProfileRequest, current_user=Depends(get_current_user)):
+    """Modifier nom et/ou email — interdit pour les comptes Google."""
+    user_id = current_user["sub"]
+
+    # Vérifier que ce n'est pas un compte Google
+    check = supabase.table("users").select("password_hash").eq("id", user_id).execute()
+    if check.data and check.data[0].get("password_hash") == "google_oauth":
+        raise HTTPException(status_code=403, detail="Impossible de modifier un compte Google")
+
+    updates = {}
+    if data.name:  updates["name"]  = data.name.strip()
+    if data.email: updates["email"] = data.email.strip().lower()
+    if not updates:
+        raise HTTPException(status_code=400, detail="Aucune donnée à mettre à jour")
+
+    res = supabase.table("users").update(updates).eq("id", user_id).execute()
+    if not res.data:
+        raise HTTPException(status_code=500, detail="Erreur mise à jour")
+    return {"message": "Profil mis à jour", **updates}
