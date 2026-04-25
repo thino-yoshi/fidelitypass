@@ -319,3 +319,28 @@ def get_merchant_stats(user=Depends(get_current_user)):
         "total_rewards": total_rewards,
         "total_scans": total_scans,
     }
+
+
+@router.delete("/{card_id}")
+def delete_card(card_id: str, user=Depends(get_current_user)):
+    """Supprime une carte de fidélité appartenant au client connecté."""
+    if user.get("user_type") != "client":
+        raise HTTPException(status_code=403, detail="Réservé aux clients")
+
+    # Vérifier que la carte appartient bien à ce client
+    card_res = supabase.table("loyalty_cards")\
+        .select("id")\
+        .eq("id", card_id)\
+        .eq("client_id", user["sub"])\
+        .execute()
+
+    if not card_res.data:
+        raise HTTPException(status_code=404, detail="Carte non trouvée")
+
+    # Supprimer l'historique de scan lié
+    supabase.table("scan_history").delete().eq("card_id", card_id).execute()
+
+    # Supprimer la carte
+    supabase.table("loyalty_cards").delete().eq("id", card_id).execute()
+
+    return {"message": "Carte supprimée"}
