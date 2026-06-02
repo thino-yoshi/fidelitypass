@@ -23,10 +23,16 @@ class UpdateProfileRequest(BaseModel):
 
 @router.put("/fcm-token")
 def update_fcm_token(data: FCMTokenUpdate, user=Depends(get_current_user)):
-    supabase.table("users")\
-        .update({"fcm_token": data.fcm_token})\
-        .eq("id", user["sub"])\
-        .execute()
+    # Upsert : crée la ligne si elle n'existe pas encore (nouveaux users Supabase Auth)
+    supabase.table("users").upsert(
+        {
+            "id":        user["sub"],
+            "email":     user.get("email", ""),
+            "user_type": user.get("user_type", "client"),
+            "fcm_token": data.fcm_token,
+        },
+        on_conflict="id",
+    ).execute()
     return {"message": "Token FCM mis à jour"}
 
 @router.put("/change-password")

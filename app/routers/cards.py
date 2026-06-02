@@ -1,23 +1,15 @@
 from fastapi import APIRouter, HTTPException, Depends, Query
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from app.database import supabase, SECRET_KEY
-from jose import jwt, JWTError
+from app.dependencies import get_current_user
+from jose import jwt
 import uuid
 import csv
 import io
 from datetime import datetime, timedelta, timezone
 
 router = APIRouter(tags=["Cards"])
-security = HTTPBearer()
-
-def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    try:
-        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=["HS256"])
-        return payload
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Token invalide")
 
 class CreateCardRequest(BaseModel):
     merchant_id: str
@@ -80,7 +72,29 @@ def get_my_cards(user=Depends(get_current_user), limit: int = Query(50, ge=1, le
     cards = supabase.table("loyalty_cards").select(
         "*, merchants(business_name, category, stamps_required, reward_description, program_type, points_per_euro, points_required)"
     ).eq("client_id", client_id).range(offset, offset + limit - 1).execute()
-    return cards.data if cards.data else []
+
+    if not cards.data:
+        return []
+
+    # Récupérer les designs de cartes pour tous les commerçants en une seule requête
+    merchant_ids = list({c["merchant_id"] for c in cards.data if c.get("merchant_id")})
+    designs: dict = {}
+    if merchant_ids:
+        try:
+            design_res = supabase.table("merchant_card_designs") \
+                .select("merchant_id, card_design") \
+                .in_("merchant_id", merchant_ids) \
+                .execute()
+            designs = {d["merchant_id"]: d["card_design"] for d in (design_res.data or [])}
+        except Exception:
+            pass  # Pas bloquant si la table n'existe pas encore
+
+    # Embarquer le design dans chaque carte
+    for card in cards.data:
+        mid = card.get("merchant_id")
+        card["card_design"] = designs.get(mid)  # None si aucun design
+
+    return cards.data
 
 @router.get("/qr/{card_id}")
 def get_dynamic_qr(card_id: str, user=Depends(get_current_user)):

@@ -1,8 +1,8 @@
 from fastapi import APIRouter, HTTPException, Depends, Request
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from typing import Optional
 from app.database import supabase, SECRET_KEY
+from app.dependencies import get_current_user
 from app.limiter import limiter
 from app.logger import get_logger
 from jose import jwt, JWTError
@@ -10,14 +10,6 @@ from jose import jwt, JWTError
 logger = get_logger("scan")
 
 router = APIRouter(tags=["Scan"])
-security = HTTPBearer()
-
-def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    try:
-        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=["HS256"])
-        return payload
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Token invalide")
 
 class ScanRequest(BaseModel):
     qr_token: str

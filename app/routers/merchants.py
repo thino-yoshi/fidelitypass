@@ -1,19 +1,10 @@
 from fastapi import APIRouter, HTTPException, Depends, Query
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
-from app.database import supabase, SECRET_KEY
-from jose import jwt, JWTError
+from app.database import supabase
+from app.dependencies import get_current_user
 import uuid
 
 router = APIRouter(tags=["Merchants"])
-security = HTTPBearer()
-
-def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    try:
-        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=["HS256"])
-        return payload
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Token invalide")
 
 class MerchantCreate(BaseModel):
     business_name: str
@@ -33,11 +24,14 @@ def get_merchants(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, g
     res = supabase.table("merchants").select("*").range(offset, offset + limit - 1).execute()
     return res.data
 
-@router.get("/{merchant_id}")
-def get_merchant(merchant_id: str):
-    res = supabase.table("merchants").select("*").eq("id", merchant_id).execute()
+@router.get("/me")
+def get_my_merchant_profile(user=Depends(get_current_user)):
+    """Retourne le profil complet du commerçant connecté."""
+    if user["user_type"] != "merchant":
+        raise HTTPException(status_code=403, detail="Réservé aux commerçants")
+    res = supabase.table("merchants").select("*").eq("id", user["sub"]).execute()
     if not res.data:
-        raise HTTPException(status_code=404, detail="Commerçant non trouvé")
+        raise HTTPException(status_code=404, detail="Profil commerçant non trouvé — configurez votre commerce sur qarta.be")
     return res.data[0]
 
 @router.post("/setup")
@@ -64,6 +58,23 @@ def setup_merchant(data: MerchantCreate, user=Depends(get_current_user)):
     else:
         # Créer
         res = supabase.table("merchants").insert({"id": user["sub"], **fields}).execute()
+
+    return res.data[0]
+
+
+@router.get("/me/card-design")
+def get_card_design(user=Depends(get_current_user)):
+    """Retourne le design de carte du commerçant (créé via qarta.be)."""
+    if user["user_type"] != "merchant":
+        raise HTTPException(status_code=403, detail="Réservé aux commerçants")
+
+    res = supabase.table("merchant_card_designs")\
+        .select("card_design, updated_at")\
+        .eq("merchant_id", user["sub"])\
+        .execute()
+
+    if not res.data:
+        raise HTTPException(status_code=404, detail="Aucun design de carte trouvé — créez votre carte sur qarta.be")
 
     return res.data[0]
 
@@ -135,3 +146,12 @@ def delete_merchant_reward(reward_id: str, user=Depends(get_current_user)):
     supabase.table("merchant_rewards").delete().eq("id", reward_id).execute()
 
     return {"message": "Récompense supprimée"}
+
+
+# ⚠️ Route générique TOUJOURS en dernier — sinon elle capture /me, /me/static-qr, etc.
+@router.get("/{merchant_id}")
+def get_merchant(merchant_id: str):
+    res = supabase.table("merchants").select("*").eq("id", merchant_id).execute()
+    if not res.data:
+        raise HTTPException(status_code=404, detail="Commerçant non trouvé")
+    return res.data[0]
