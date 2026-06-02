@@ -29,7 +29,10 @@ def get_my_merchant_profile(user=Depends(get_current_user)):
     """Retourne le profil complet du commerçant connecté."""
     if user["user_type"] != "merchant":
         raise HTTPException(status_code=403, detail="Réservé aux commerçants")
-    res = supabase.table("merchants").select("*").eq("id", user["sub"]).execute()
+    try:
+        res = supabase.table("merchants").select("*").eq("id", user["sub"]).execute()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur base de données : {str(e)}")
     if not res.data:
         raise HTTPException(status_code=404, detail="Profil commerçant non trouvé — configurez votre commerce sur qarta.be")
     return res.data[0]
