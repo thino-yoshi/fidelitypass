@@ -41,13 +41,44 @@ def join_via_static_qr(data: JoinMerchantRequest, user=Depends(get_current_user)
     if existing.data:
         return {"already_member": True, "card": existing.data[0], "merchant": merchant}
 
-    qr_token = str(uuid.uuid4())
-    card = supabase.table("loyalty_cards").insert({
-        "client_id": user["sub"],
-        "merchant_id": merchant_id,
-        "stamps_count": 0,
-        "qr_token": qr_token,
-    }).execute()
+    # ── Auto-sync auth.users → public.users si manquant ───────────────────────
+    # public.users a des colonnes NOT NULL : email, password_hash, user_type, name
+    # On fournit des valeurs par défaut pour éviter les violations de contraintes.
+    user_email = user.get("email") or f"user-{user['sub'][:8]}@qarta.local"
+    user_name = user_email.split("@")[0] if "@" in user_email else "Client"
+
+    try:
+        # Vérifier si l'utilisateur existe déjà dans public.users
+        existing_user = supabase.table("users").select("id").eq("id", user["sub"]).execute()
+        if not existing_user.data:
+            supabase.table("users").insert({
+                "id": user["sub"],
+                "email": user_email,
+                "user_type": "client",
+                "name": user_name,
+                "password_hash": "SUPABASE_AUTH",  # géré par Supabase Auth, pas par nous
+            }).execute()
+    except Exception as e:
+        # Logger l'erreur complète pour debugging
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erreur création profil utilisateur : {type(e).__name__}: {str(e)}"
+        )
+
+    # ── Créer la carte de fidélité ─────────────────────────────────────────────
+    try:
+        qr_token = str(uuid.uuid4())
+        card = supabase.table("loyalty_cards").insert({
+            "client_id": user["sub"],
+            "merchant_id": merchant_id,
+            "stamps_count": 0,
+            "qr_token": qr_token,
+        }).execute()
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erreur création carte : {type(e).__name__}: {str(e)}"
+        )
 
     return {"already_member": False, "card": card.data[0], "merchant": merchant}
 
