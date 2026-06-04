@@ -15,6 +15,46 @@ class ScanRequest(BaseModel):
     qr_token: str
     amount: Optional[float] = None
 
+class ResolveRequest(BaseModel):
+    qr_token: str
+
+
+@router.post("/resolve")
+@limiter.limit("60/minute")
+def resolve_qr(request: Request, data: ResolveRequest, user=Depends(get_current_user)):
+    """Identifie le client d'un QR SANS ajouter de tampon (le commerçant choisira
+    ensuite combien de tampons ajouter via /cards/{id}/adjust-stamp)."""
+    if user["user_type"] != "merchant":
+        raise HTTPException(status_code=403, detail="Réservé aux commerçants")
+
+    real_qr_token = data.qr_token
+    try:
+        decoded = jwt.decode(data.qr_token, SECRET_KEY, algorithms=["HS256"])
+        real_qr_token = decoded.get("qr_token", data.qr_token)
+    except JWTError:
+        pass
+
+    res = supabase.table("loyalty_cards").select("*").eq("qr_token", real_qr_token).execute()
+    if not res.data:
+        raise HTTPException(status_code=404, detail="QR code invalide ou expiré")
+    card = res.data[0]
+    if card["merchant_id"] != user["sub"]:
+        raise HTTPException(status_code=403, detail="Cette carte n'appartient pas à votre commerce")
+
+    merchant = supabase.table("merchants").select("*").eq("id", user["sub"]).execute().data[0]
+    client_res = supabase.table("users").select("name, email, profile_picture_url").eq("id", card["client_id"]).execute()
+    client = client_res.data[0] if client_res.data else {}
+
+    return {
+        "card_id":          card["id"],
+        "client_id":        card["client_id"],
+        "client_name":      client.get("name") or client.get("email") or "Client",
+        "profile_picture_url": client.get("profile_picture_url"),
+        "stamps_count":     card["stamps_count"],
+        "stamps_required":  merchant.get("stamps_required", 10),
+        "program_type":     merchant.get("program_type", "stamps"),
+    }
+
 @router.post("/")
 @limiter.limit("60/minute")
 def scan_qr(request: Request, data: ScanRequest, user=Depends(get_current_user)):

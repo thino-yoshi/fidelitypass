@@ -218,7 +218,7 @@ def get_merchant_clients(user=Depends(get_current_user), limit: int = Query(50, 
 
 
 class AdjustStampRequest(BaseModel):
-    delta: int  # +1 ou -1
+    delta: int  # ex: +1, +3 (ajout) ou -1 (retrait)
 
 
 @router.post("/{card_id}/adjust-stamp")
@@ -226,8 +226,9 @@ def adjust_stamp(card_id: str, data: AdjustStampRequest, user=Depends(get_curren
     if user["user_type"] != "merchant":
         raise HTTPException(status_code=403, detail="Réservé aux commerçants")
 
-    if data.delta not in (1, -1):
-        raise HTTPException(status_code=400, detail="delta doit être 1 ou -1")
+    # Ajout de 1 à 20 tampons d'un coup, ou retrait de 1
+    if data.delta == 0 or data.delta < -1 or data.delta > 20:
+        raise HTTPException(status_code=400, detail="delta doit être entre -1 et 20 (hors 0)")
 
     card_res = supabase.table("loyalty_cards")\
         .select("*")\
@@ -241,10 +242,16 @@ def adjust_stamp(card_id: str, data: AdjustStampRequest, user=Depends(get_curren
     merchant_res = supabase.table("merchants").select("stamps_required").eq("id", user["sub"]).execute()
     stamps_required = merchant_res.data[0]["stamps_required"] if merchant_res.data else 10
 
-    new_count = max(0, min(card["stamps_count"] + data.delta, stamps_required))
-    reward_reached = new_count >= stamps_required
+    new_total = card["stamps_count"] + data.delta
+    if new_total < 0:
+        new_total = 0
+
+    # Récompense atteinte si l'ajout fait franchir le seuil ; le reste est reporté.
+    reward_reached = data.delta > 0 and new_total >= stamps_required
     if reward_reached:
-        new_count = 0
+        new_count = new_total % stamps_required   # report du surplus (ex: 11 sur 10 -> 1)
+    else:
+        new_count = min(new_total, stamps_required)
 
     supabase.table("loyalty_cards").update({"stamps_count": new_count}).eq("id", card_id).execute()
 
