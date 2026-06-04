@@ -6,6 +6,21 @@ import os
 security = HTTPBearer()
 
 
+def _resolve_user_type(meta: dict) -> str:
+    """
+    Détermine le type de compte depuis user_metadata.
+    Règle : site = marchand (clé `role`), app = client (clé `user_type`).
+    On lit les deux clés pour être robuste quel que soit l'endroit de création.
+    """
+    ut = (meta.get("user_type") or "").strip()
+    if ut in ("merchant", "client"):
+        return ut
+    role = (meta.get("role") or "").strip()
+    if role == "merchant":
+        return "merchant"
+    return "client"
+
+
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     """
     Vérifie le token Bearer Supabase et retourne un payload normalisé :
@@ -32,7 +47,7 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
                 options={"verify_aud": False},  # audience = "authenticated" côté Supabase
             )
             user_metadata = payload.get("user_metadata") or {}
-            user_type = user_metadata.get("user_type") or "client"
+            user_type = _resolve_user_type(user_metadata)
             sub = payload.get("sub")
             if sub:
                 return {
@@ -49,7 +64,7 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
         if response and response.user:
             user = response.user
             user_metadata = user.user_metadata or {}
-            user_type = user_metadata.get("user_type") or "client"
+            user_type = _resolve_user_type(user_metadata)
             return {
                 "sub":       user.id,
                 "user_type": user_type,
