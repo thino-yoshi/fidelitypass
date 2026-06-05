@@ -239,17 +239,29 @@ def adjust_stamp(card_id: str, data: AdjustStampRequest, user=Depends(get_curren
         raise HTTPException(status_code=404, detail="Carte non trouvée")
 
     card = card_res.data[0]
-    merchant_res = supabase.table("merchants").select("stamps_required").eq("id", user["sub"]).execute()
-    stamps_required = merchant_res.data[0]["stamps_required"] if merchant_res.data else 10
+    merchant_res = supabase.table("merchants").select("stamps_required, reward_description").eq("id", user["sub"]).execute()
+    merchant = merchant_res.data[0] if merchant_res.data else {}
+    stamps_required = merchant.get("stamps_required") or 10
+    reward_desc = merchant.get("reward_description") or "Récompense"
 
     new_total = card["stamps_count"] + data.delta
     if new_total < 0:
         new_total = 0
 
-    # Récompense atteinte si l'ajout fait franchir le seuil ; le reste est reporté.
+    # Récompense atteinte si l'ajout fait franchir le seuil. Chaque carte complétée
+    # crée une récompense (portefeuille) ; le reste repart sur une carte vierge.
     reward_reached = data.delta > 0 and new_total >= stamps_required
+    completions = 0
     if reward_reached:
-        new_count = new_total % stamps_required   # report du surplus (ex: 11 sur 10 -> 1)
+        completions = new_total // stamps_required          # ex: 21 / 10 = 2 récompenses
+        new_count = new_total % stamps_required              # reste sur la nouvelle carte (ex: 1)
+        reward_rows = [{
+            "client_id": card["client_id"],
+            "merchant_id": user["sub"],
+            "description": reward_desc,
+        } for _ in range(completions)]
+        if reward_rows:
+            supabase.table("rewards").insert(reward_rows).execute()
     else:
         new_count = min(new_total, stamps_required)
 
@@ -269,6 +281,7 @@ def adjust_stamp(card_id: str, data: AdjustStampRequest, user=Depends(get_curren
         "stamps_count": new_count,
         "stamps_required": stamps_required,
         "reward_reached": reward_reached,
+        "rewards_earned": completions,
     }
 
 

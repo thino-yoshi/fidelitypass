@@ -22,18 +22,40 @@ class ResolveRequest(BaseModel):
 @router.post("/resolve")
 @limiter.limit("60/minute")
 def resolve_qr(request: Request, data: ResolveRequest, user=Depends(get_current_user)):
-    """Identifie le client d'un QR SANS ajouter de tampon (le commerçant choisira
-    ensuite combien de tampons ajouter via /cards/{id}/adjust-stamp)."""
+    """Identifie un QR scanné par le commerçant SANS rien modifier.
+    Renvoie kind='reward' (QR de récompense à valider) ou kind='stamp' (carte à tamponner)."""
     if user["user_type"] != "merchant":
         raise HTTPException(status_code=403, detail="Réservé aux commerçants")
 
-    real_qr_token = data.qr_token
+    decoded = None
     try:
         decoded = jwt.decode(data.qr_token, SECRET_KEY, algorithms=["HS256"])
-        real_qr_token = decoded.get("qr_token", data.qr_token)
     except JWTError:
         pass
 
+    # ── Cas RÉCOMPENSE ──────────────────────────────────────────────────────────
+    if decoded and decoded.get("type") == "reward":
+        reward_id = decoded.get("reward_id")
+        rres = supabase.table("rewards").select("*").eq("id", reward_id).execute()
+        if not rres.data:
+            raise HTTPException(status_code=404, detail="Récompense introuvable")
+        rw = rres.data[0]
+        if rw["merchant_id"] != user["sub"]:
+            raise HTTPException(status_code=403, detail="Cette récompense n'est pas pour votre commerce")
+        if rw.get("redeemed_at"):
+            raise HTTPException(status_code=400, detail="Récompense déjà utilisée")
+        client_res = supabase.table("users").select("name, email").eq("id", rw["client_id"]).execute()
+        client = client_res.data[0] if client_res.data else {}
+        return {
+            "kind":        "reward",
+            "reward_id":   reward_id,
+            "qr_token":    data.qr_token,
+            "client_name": client.get("name") or client.get("email") or "Client",
+            "description": rw.get("description") or "Récompense",
+        }
+
+    # ── Cas TAMPON (carte) ──────────────────────────────────────────────────────
+    real_qr_token = decoded.get("qr_token", data.qr_token) if decoded else data.qr_token
     res = supabase.table("loyalty_cards").select("*").eq("qr_token", real_qr_token).execute()
     if not res.data:
         raise HTTPException(status_code=404, detail="QR code invalide ou expiré")
@@ -46,6 +68,7 @@ def resolve_qr(request: Request, data: ResolveRequest, user=Depends(get_current_
     client = client_res.data[0] if client_res.data else {}
 
     return {
+        "kind":             "stamp",
         "card_id":          card["id"],
         "client_id":        card["client_id"],
         "client_name":      client.get("name") or client.get("email") or "Client",
