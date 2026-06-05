@@ -26,12 +26,24 @@ def my_rewards(user=Depends(get_current_user)):
     )
     rewards = res.data or []
     merchant_ids = list({r["merchant_id"] for r in rewards})
-    names = {}
+    merchants, designs = {}, {}
     if merchant_ids:
-        m = supabase.table("merchants").select("id, business_name").in_("id", merchant_ids).execute()
-        names = {x["id"]: x["business_name"] for x in (m.data or [])}
+        m = (supabase.table("merchants")
+             .select("id, business_name, stamps_required, points_required, program_type, reward_description")
+             .in_("id", merchant_ids).execute())
+        merchants = {x["id"]: x for x in (m.data or [])}
+        try:
+            d = (supabase.table("merchant_card_designs")
+                 .select("merchant_id, card_design")
+                 .in_("merchant_id", merchant_ids).execute())
+            designs = {x["merchant_id"]: x["card_design"] for x in (d.data or [])}
+        except Exception:
+            pass
     for r in rewards:
-        r["merchant_name"] = names.get(r["merchant_id"], "Commerce")
+        mi = merchants.get(r["merchant_id"], {})
+        r["merchant_name"] = mi.get("business_name", "Commerce")
+        r["merchant"]      = mi          # business_name, stamps_required, points_required, program_type, reward_description
+        r["card_design"]   = designs.get(r["merchant_id"])
     return rewards
 
 
