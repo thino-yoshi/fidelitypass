@@ -285,6 +285,28 @@ def adjust_stamp(card_id: str, data: AdjustStampRequest, user=Depends(get_curren
     }
 
 
+class ClientNoteRequest(BaseModel):
+    note: str = ""
+
+
+@router.post("/{card_id}/note")
+def set_client_note(card_id: str, data: ClientNoteRequest, user=Depends(get_current_user)):
+    """Note privée du commerçant sur un client (stockée sur sa carte de fidélité)."""
+    if user["user_type"] != "merchant":
+        raise HTTPException(status_code=403, detail="Réservé aux commerçants")
+
+    card_res = supabase.table("loyalty_cards")\
+        .select("id")\
+        .eq("id", card_id)\
+        .eq("merchant_id", user["sub"])\
+        .execute()
+    if not card_res.data:
+        raise HTTPException(status_code=404, detail="Carte non trouvée")
+
+    supabase.table("loyalty_cards").update({"merchant_note": data.note.strip()}).eq("id", card_id).execute()
+    return {"success": True, "merchant_note": data.note.strip()}
+
+
 @router.get("/export-csv")
 def export_clients_csv(user=Depends(get_current_user)):
     if user["user_type"] != "merchant":
