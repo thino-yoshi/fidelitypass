@@ -65,6 +65,39 @@ def setup_merchant(data: MerchantCreate, user=Depends(get_current_user)):
     return res.data[0]
 
 
+class MerchantInfo(BaseModel):
+    business_name: str
+    address: str = ""
+    phone: str = ""
+    website: str = ""
+    opening_days: str = ""    # ex: "Lun,Mar,Mer,Jeu,Ven"
+    opening_hours: str = ""   # ex: "11:30-22:00"
+    description: str = ""
+
+
+@router.post("/me/info")
+def update_merchant_info(data: MerchantInfo, user=Depends(get_current_user)):
+    """Met à jour les infos publiques du commerce (écran Info commerce)."""
+    if user["user_type"] != "merchant":
+        raise HTTPException(status_code=403, detail="Réservé aux commerçants")
+
+    existing = supabase.table("merchants").select("id").eq("id", user["sub"]).execute()
+    if not existing.data:
+        raise HTTPException(status_code=404, detail="Profil commerçant non trouvé — configurez votre commerce sur qarta.be")
+
+    fields = {
+        "business_name": data.business_name.strip(),
+        "address": data.address.strip(),
+        "phone": data.phone.strip(),
+        "website": data.website.strip(),
+        "opening_days": data.opening_days,
+        "opening_hours": data.opening_hours,
+        "description": data.description.strip(),
+    }
+    res = supabase.table("merchants").update(fields).eq("id", user["sub"]).execute()
+    return res.data[0]
+
+
 @router.get("/me/card-design")
 def get_card_design(user=Depends(get_current_user)):
     """Retourne le design de carte du commerçant (créé via qarta.be)."""
