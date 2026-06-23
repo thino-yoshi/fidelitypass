@@ -98,6 +98,31 @@ def update_merchant_info(data: MerchantInfo, user=Depends(get_current_user)):
     return res.data[0]
 
 
+class CardDesignPayload(BaseModel):
+    card_design: dict
+
+
+@router.post("/me/card-design")
+def save_card_design(data: CardDesignPayload, user=Depends(get_current_user)):
+    """Crée ou met à jour le design visuel de la carte fidélité."""
+    if user["user_type"] != "merchant":
+        raise HTTPException(status_code=403, detail="Réservé aux commerçants")
+
+    existing = supabase.table("merchant_card_designs") \
+        .select("id").eq("merchant_id", user["sub"]).execute()
+
+    if existing.data:
+        res = supabase.table("merchant_card_designs") \
+            .update({"card_design": data.card_design}) \
+            .eq("merchant_id", user["sub"]).execute()
+    else:
+        res = supabase.table("merchant_card_designs") \
+            .insert({"merchant_id": user["sub"], "card_design": data.card_design}) \
+            .execute()
+
+    return res.data[0]
+
+
 @router.get("/me/card-design")
 def get_card_design(user=Depends(get_current_user)):
     """Retourne le design de carte du commerçant (créé via qarta.be)."""
