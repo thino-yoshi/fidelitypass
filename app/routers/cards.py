@@ -243,26 +243,32 @@ def adjust_stamp(card_id: str, data: AdjustStampRequest, user=Depends(get_curren
         raise HTTPException(status_code=404, detail="Carte non trouvée")
 
     card = card_res.data[0]
-    merchant_res = supabase.table("merchants").select("stamps_required, reward_description, program_type").eq("id", user["sub"]).execute()
+    merchant_res = supabase.table("merchants").select("stamps_required, points_required, points_per_euro, reward_description, program_type").eq("id", user["sub"]).execute()
     merchant = merchant_res.data[0] if merchant_res.data else {}
     program_type = merchant.get("program_type") or "stamps"
-    # Mode tampons : cap à 20 par ajout manuel
-    if program_type == "stamps" and data.delta > 20:
-        raise HTTPException(status_code=400, detail="delta doit être entre 1 et 20 pour un programme tampons")
-    stamps_required = merchant.get("stamps_required") or 10
     reward_desc = merchant.get("reward_description") or "Récompense"
 
-    new_total = card["stamps_count"] + data.delta
+    if program_type == "points":
+        count_field = "points_count"
+        required = merchant.get("points_required") or 100
+        # Mode tampons : cap à 20 par ajout manuel
+    else:
+        count_field = "stamps_count"
+        required = merchant.get("stamps_required") or 10
+        if data.delta > 20:
+            raise HTTPException(status_code=400, detail="delta doit être entre 1 et 20 pour un programme tampons")
+
+    new_total = (card.get(count_field) or 0) + data.delta
     if new_total < 0:
         new_total = 0
 
     # Récompense atteinte si l'ajout fait franchir le seuil. Chaque carte complétée
     # crée une récompense (portefeuille) ; le reste repart sur une carte vierge.
-    reward_reached = data.delta > 0 and new_total >= stamps_required
+    reward_reached = data.delta > 0 and new_total >= required
     completions = 0
     if reward_reached:
-        completions = new_total // stamps_required          # ex: 21 / 10 = 2 récompenses
-        new_count = new_total % stamps_required              # reste sur la nouvelle carte (ex: 1)
+        completions = new_total // required
+        new_count = new_total % required
         reward_rows = [{
             "client_id": card["client_id"],
             "merchant_id": user["sub"],
@@ -271,9 +277,9 @@ def adjust_stamp(card_id: str, data: AdjustStampRequest, user=Depends(get_curren
         if reward_rows:
             supabase.table("rewards").insert(reward_rows).execute()
     else:
-        new_count = min(new_total, stamps_required)
+        new_count = min(new_total, required)
 
-    supabase.table("loyalty_cards").update({"stamps_count": new_count}).eq("id", card_id).execute()
+    supabase.table("loyalty_cards").update({count_field: new_count}).eq("id", card_id).execute()
 
     supabase.table("scan_history").insert({
         "merchant_id": user["sub"],
@@ -287,7 +293,7 @@ def adjust_stamp(card_id: str, data: AdjustStampRequest, user=Depends(get_curren
     return {
         "success": True,
         "stamps_count": new_count,
-        "stamps_required": stamps_required,
+        "stamps_required": required,
         "reward_reached": reward_reached,
         "rewards_earned": completions,
     }

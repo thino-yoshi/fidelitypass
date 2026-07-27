@@ -67,15 +67,23 @@ def resolve_qr(request: Request, data: ResolveRequest, user=Depends(get_current_
     client_res = supabase.table("users").select("name, email, profile_picture_url").eq("id", card["client_id"]).execute()
     client = client_res.data[0] if client_res.data else {}
 
+    program_type = merchant.get("program_type", "stamps")
+    if program_type == "points":
+        current_count = card.get("points_count") or 0
+        required = merchant.get("points_required") or 100
+    else:
+        current_count = card.get("stamps_count") or 0
+        required = merchant.get("stamps_required") or 10
+
     return {
         "kind":             "stamp",
         "card_id":          card["id"],
         "client_id":        card["client_id"],
         "client_name":      client.get("name") or client.get("email") or "Client",
         "profile_picture_url": client.get("profile_picture_url"),
-        "stamps_count":     card["stamps_count"],
-        "stamps_required":  merchant.get("stamps_required", 10),
-        "program_type":     merchant.get("program_type", "stamps"),
+        "stamps_count":     current_count,
+        "stamps_required":  required,
+        "program_type":     program_type,
     }
 
 @router.post("/")
