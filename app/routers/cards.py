@@ -218,6 +218,39 @@ def get_merchant_clients(user=Depends(get_current_user), limit: int = Query(50, 
     return results
 
 
+@router.get("/{card_id}/poll")
+def poll_stamp(card_id: str, user=Depends(get_current_user)):
+    """Polling léger côté client : retourne l'état actuel + horodatage du dernier scan.
+    Le client compare le scanned_at au timestamp d'ouverture du QR modal pour détecter
+    un nouveau tampon — fiable même si points_count boucle sur la même valeur."""
+    if user["user_type"] != "client":
+        raise HTTPException(status_code=403, detail="Réservé aux clients")
+
+    card_res = supabase.table("loyalty_cards")\
+        .select("id, stamps_count, points_count, merchant_id")\
+        .eq("id", card_id)\
+        .eq("client_id", user["sub"])\
+        .execute()
+    if not card_res.data:
+        raise HTTPException(status_code=404, detail="Carte non trouvée")
+    card = card_res.data[0]
+
+    scan_res = supabase.table("scan_history")\
+        .select("stamps_count, reward_reached, scanned_at")\
+        .eq("card_id", card_id)\
+        .order("scanned_at", desc=True)\
+        .limit(1)\
+        .execute()
+    latest = scan_res.data[0] if scan_res.data else None
+
+    return {
+        "stamps_count": card.get("stamps_count") or 0,
+        "points_count": card.get("points_count") or 0,
+        "latest_scan_at":        latest["scanned_at"]     if latest else None,
+        "latest_reward_reached": latest.get("reward_reached", False) if latest else False,
+    }
+
+
 class AdjustStampRequest(BaseModel):
     delta: int  # ex: +1, +3 (ajout) ou -1 (retrait)
 
@@ -268,7 +301,7 @@ def adjust_stamp(card_id: str, data: AdjustStampRequest, user=Depends(get_curren
     completions = 0
     if reward_reached:
         completions = new_total // required
-        new_count = new_total % required
+        new_count = 0  # toujours remettre à 0 — sinon (90+1000)%1000=90 et le polling client ne détecte rien
         reward_rows = [{
             "client_id": card["client_id"],
             "merchant_id": user["sub"],
