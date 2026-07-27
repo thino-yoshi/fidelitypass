@@ -227,9 +227,12 @@ def adjust_stamp(card_id: str, data: AdjustStampRequest, user=Depends(get_curren
     if user["user_type"] != "merchant":
         raise HTTPException(status_code=403, detail="Réservé aux commerçants")
 
-    # Ajout de 1 à 20 tampons d'un coup, ou retrait de 1
-    if data.delta == 0 or data.delta < -1 or data.delta > 20:
-        raise HTTPException(status_code=400, detail="delta doit être entre -1 et 20 (hors 0)")
+    # Retrait : -1 uniquement. Ajout : jusqu'à 20 tampons (mode stamps) ou
+    # jusqu'à 100 000 points (mode points — ex: 10 000 € × 10 pts/€).
+    if data.delta == 0 or data.delta < -1:
+        raise HTTPException(status_code=400, detail="delta invalide (0 interdit, retrait = -1 uniquement)")
+    if data.delta > 100_000:
+        raise HTTPException(status_code=400, detail="delta trop élevé (max 100 000)")
 
     card_res = supabase.table("loyalty_cards")\
         .select("*")\
@@ -240,8 +243,12 @@ def adjust_stamp(card_id: str, data: AdjustStampRequest, user=Depends(get_curren
         raise HTTPException(status_code=404, detail="Carte non trouvée")
 
     card = card_res.data[0]
-    merchant_res = supabase.table("merchants").select("stamps_required, reward_description").eq("id", user["sub"]).execute()
+    merchant_res = supabase.table("merchants").select("stamps_required, reward_description, program_type").eq("id", user["sub"]).execute()
     merchant = merchant_res.data[0] if merchant_res.data else {}
+    program_type = merchant.get("program_type") or "stamps"
+    # Mode tampons : cap à 20 par ajout manuel
+    if program_type == "stamps" and data.delta > 20:
+        raise HTTPException(status_code=400, detail="delta doit être entre 1 et 20 pour un programme tampons")
     stamps_required = merchant.get("stamps_required") or 10
     reward_desc = merchant.get("reward_description") or "Récompense"
 
