@@ -301,7 +301,7 @@ def adjust_stamp(card_id: str, data: AdjustStampRequest, user=Depends(get_curren
     completions = 0
     if reward_reached:
         completions = new_total // required
-        new_count = 0  # toujours remettre à 0 — sinon (90+1000)%1000=90 et le polling client ne détecte rien
+        new_count = new_total % required  # surplus reporté sur la prochaine carte
         reward_rows = [{
             "client_id": card["client_id"],
             "merchant_id": user["sub"],

@@ -128,7 +128,7 @@ def scan_qr(request: Request, data: ScanRequest, user=Depends(get_current_user))
 
         reward_reached = new_points >= points_required
         if reward_reached:
-            new_points = 0
+            new_points = new_points % points_required  # surplus reporté
 
         supabase.table("loyalty_cards").update({"points_count": new_points}).eq("id", card["id"]).execute()
 
