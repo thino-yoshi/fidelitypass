@@ -441,20 +441,35 @@ def get_daily_stats(user=Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="Réservé aux commerçants")
 
     since = (datetime.now(timezone.utc) - timedelta(days=29)).isoformat()
-    res = supabase.table("scan_history")\
-        .select("scanned_at, reward_reached")\
+
+    # Scans par jour
+    scan_res = supabase.table("scan_history")\
+        .select("scanned_at")\
         .eq("merchant_id", user["sub"])\
         .gte("scanned_at", since)\
         .execute()
 
-    daily = {}
-    for scan in res.data:
+    # Récompenses utilisées (redeemed) par jour — pas les atteintes non utilisées
+    reward_res = supabase.table("rewards")\
+        .select("redeemed_at")\
+        .eq("merchant_id", user["sub"])\
+        .gte("redeemed_at", since)\
+        .execute()
+
+    daily: dict = {}
+    for scan in (scan_res.data or []):
         day = scan["scanned_at"][:10]
         if day not in daily:
             daily[day] = {"scans": 0, "rewards": 0}
         daily[day]["scans"] += 1
-        if scan.get("reward_reached"):
-            daily[day]["rewards"] += 1
+
+    for reward in (reward_res.data or []):
+        if not reward.get("redeemed_at"):
+            continue
+        day = reward["redeemed_at"][:10]
+        if day not in daily:
+            daily[day] = {"scans": 0, "rewards": 0}
+        daily[day]["rewards"] += 1
 
     result = []
     for i in range(30):
