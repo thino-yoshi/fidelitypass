@@ -126,6 +126,29 @@ def get_my_cards(user=Depends(get_current_user), limit: int = Query(50, ge=1, le
         mid = card.get("merchant_id")
         card["card_design"] = designs.get(mid)  # None si aucun design
 
+    # Récupérer le dernier scan par carte (une seule requête bulk)
+    card_ids = [c["id"] for c in cards.data]
+    last_scan_map: dict = {}
+    if card_ids:
+        try:
+            scan_res = supabase.table("scan_history") \
+                .select("card_id, scanned_at") \
+                .in_("card_id", card_ids) \
+                .order("scanned_at", desc=True) \
+                .execute()
+            for s in (scan_res.data or []):
+                cid = s["card_id"]
+                if cid not in last_scan_map:
+                    last_scan_map[cid] = s["scanned_at"]
+        except Exception:
+            pass
+
+    for card in cards.data:
+        card["last_scan_at"] = last_scan_map.get(card["id"])  # None si jamais scannée
+
+    # Trier : dernière utilisée en premier, jamais scannées à la fin
+    cards.data.sort(key=lambda c: c.get("last_scan_at") or "", reverse=True)
+
     return cards.data
 
 @router.get("/qr/{card_id}")
@@ -157,17 +180,39 @@ def get_client_history(user=Depends(get_current_user)):
         .limit(100)\
         .execute()
 
-    results = []
-    for scan in res.data:
-        merchant_res = supabase.table("merchants")\
-            .select("business_name, category")\
-            .eq("id", scan["merchant_id"])\
+    # Batch-fetch merchants (évite N requêtes)
+    merchant_ids = list({s["merchant_id"] for s in (res.data or [])})
+    merchant_map: dict = {}
+    if merchant_ids:
+        m_res = supabase.table("merchants")\
+            .select("id, business_name, category, program_type, points_required")\
+            .in_("id", merchant_ids)\
             .execute()
-        merchant = merchant_res.data[0] if merchant_res.data else {}
-        scan["merchant"] = merchant
-        results.append(scan)
+        for m in (m_res.data or []):
+            merchant_map[m["id"]] = m
 
-    return results
+    # Calcul du delta par carte (ordre croissant → différence consécutive)
+    scans_asc = sorted(res.data or [], key=lambda x: x.get("scanned_at") or "")
+    prev_by_card: dict = {}
+    for scan in scans_asc:
+        merchant = merchant_map.get(scan["merchant_id"], {})
+        scan["merchant"] = merchant
+        program_type = merchant.get("program_type", "stamps")
+        if program_type == "points":
+            points_required = merchant.get("points_required") or 100
+            prev  = prev_by_card.get(scan["card_id"], 0)
+            curr  = scan.get("stamps_count") or 0
+            if scan.get("reward_reached"):
+                delta = max(0, (points_required - prev) + curr)
+            else:
+                delta = max(0, curr - prev)
+            scan["delta"] = delta
+            prev_by_card[scan["card_id"]] = curr
+        else:
+            scan["delta"] = 1
+
+    # Retour dans l'ordre décroissant (plus récent en premier)
+    return sorted(res.data or [], key=lambda x: x.get("scanned_at") or "", reverse=True)
 
 
 @router.get("/scan-history")
