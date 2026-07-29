@@ -597,17 +597,40 @@ def get_google_wallet_jwt(card_id: str, user=Depends(get_current_user)):
 
     mk = card["merchant_id"].replace("-", "")
     ck = card_id.replace("-", "")
-    class_id  = f"{issuer_id}.m{mk}"
-    object_id = f"{issuer_id}.c{ck}"
+    class_id  = f"{issuer_id}.loyalty{mk}"
+    object_id = f"{issuer_id}.loyalty{ck}"
+
+    # ── Authentification service account ──────────────────────────────────────
+    from google.oauth2 import service_account as sa_mod
+    import google.auth.transport.requests as ga_requests
+    import httpx
+
+    sa_info = {
+        "type": "service_account",
+        "client_email": sa_email,
+        "private_key": private_key,
+        "private_key_id": "key",
+        "token_uri": "https://oauth2.googleapis.com/token",
+    }
+    creds = sa_mod.Credentials.from_service_account_info(
+        sa_info,
+        scopes=["https://www.googleapis.com/auth/wallet_object.issuer"],
+    )
+    creds.refresh(ga_requests.Request())
+    auth_headers = {
+        "Authorization": f"Bearer {creds.token}",
+        "Content-Type": "application/json",
+    }
+
+    gw_base = "https://walletobjects.googleapis.com/walletobjects/v1"
 
     loyalty_class = {
         "id": class_id,
         "issuerName": "Qarta",
         "programName": merchant["business_name"],
-        "rewardsTierLabel": "Fidélité",
+        "reviewStatus": "UNDER_REVIEW",
         "hexBackgroundColor": hex_color,
         "countryCode": "BE",
-        "reviewStatus": "UNDER_REVIEW",
     }
     loyalty_object = {
         "id": object_id,
@@ -619,22 +642,37 @@ def get_google_wallet_jwt(card_id: str, user=Depends(get_current_user)):
             "balance": {"string": f"{count}/{goal}"},
             "label": "Points" if is_points else "Tampons",
         },
-        "textModulesData": [{
-            "header": "Récompense",
-            "body": merchant.get("reward_description", ""),
-            "id": "reward",
-        }],
         "barcode": {"type": "QR_CODE", "value": card["qr_token"], "alternateText": ""},
         "hexBackgroundColor": hex_color,
     }
 
+    with httpx.Client(timeout=15) as http:
+        # Classe : créer si absente, mettre à jour sinon
+        r = http.get(f"{gw_base}/loyaltyClass/{class_id}", headers=auth_headers)
+        if r.status_code == 404:
+            r = http.post(f"{gw_base}/loyaltyClass", json=loyalty_class, headers=auth_headers)
+        else:
+            r = http.put(f"{gw_base}/loyaltyClass/{class_id}", json=loyalty_class, headers=auth_headers)
+        if r.status_code not in (200, 201):
+            raise HTTPException(status_code=502, detail=f"GW class error {r.status_code}: {r.text[:300]}")
+
+        # Objet : créer si absent, patcher sinon
+        r = http.get(f"{gw_base}/loyaltyObject/{object_id}", headers=auth_headers)
+        if r.status_code == 404:
+            r = http.post(f"{gw_base}/loyaltyObject", json=loyalty_object, headers=auth_headers)
+        else:
+            r = http.patch(f"{gw_base}/loyaltyObject/{object_id}", json=loyalty_object, headers=auth_headers)
+        if r.status_code not in (200, 201):
+            raise HTTPException(status_code=502, detail=f"GW object error {r.status_code}: {r.text[:300]}")
+
+    # JWT minimal qui référence l'objet existant
     gw_payload = {
         "iss": sa_email,
         "aud": "google",
         "typ": "savetowallet",
         "iat": int(time.time()),
-        "payload": {"loyaltyClasses": [loyalty_class], "loyaltyObjects": [loyalty_object]},
-        "origins": [os.getenv("API_BASE_URL", "https://fidelitypass-production.up.railway.app")],
+        "payload": {"loyaltyObjects": [{"id": object_id}]},
+        "origins": [],
     }
 
     token = _gw_sign_jwt(gw_payload, sa_email, private_key)
