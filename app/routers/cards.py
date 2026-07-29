@@ -1,12 +1,18 @@
 from fastapi import APIRouter, HTTPException, Depends, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel
 from app.database import supabase, SECRET_KEY
 from jose import jwt, JWTError
 import uuid
 import csv
 import io
+import os
+import json as json_lib
+import time
+import hashlib
+import zipfile
+import base64
 from datetime import datetime, timedelta, timezone
 
 router = APIRouter(tags=["Cards"])
@@ -27,7 +33,7 @@ class JoinMerchantRequest(BaseModel):
 
 @router.post("/join")
 def join_via_static_qr(data: JoinMerchantRequest, user=Depends(get_current_user)):
-    if user["user_type"] != "client":
+    if user.get("user_type", "client") != "client":
         raise HTTPException(status_code=403, detail="Réservé aux clients")
 
     merchant_res = supabase.table("merchants")\
@@ -101,7 +107,7 @@ def get_dynamic_qr(card_id: str, user=Depends(get_current_user)):
 
 @router.get("/my-history")
 def get_client_history(user=Depends(get_current_user)):
-    if user["user_type"] != "client":
+    if user.get("user_type", "client") != "client":
         raise HTTPException(status_code=403, detail="Réservé aux clients")
 
     res = supabase.table("scan_history")\
@@ -319,6 +325,255 @@ def get_merchant_stats(user=Depends(get_current_user)):
         "total_rewards": total_rewards,
         "total_scans": total_scans,
     }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# WALLET — Google Wallet (Android) + Apple Wallet (iOS)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# 1×1 transparent PNG utilisé comme icône placeholder pour le .pkpass
+_ICON_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+)
+
+
+def _hex_to_rgb(hex_color: str) -> str:
+    h = hex_color.lstrip("#")
+    if len(h) != 6:
+        return "rgb(26, 26, 46)"
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"rgb({r}, {g}, {b})"
+
+
+def _card_primary_color(merchant: dict) -> str:
+    try:
+        design = json_lib.loads(merchant.get("card_design") or "{}")
+        colors = design.get("bgColors", [])
+        hex_c = colors[0] if colors else "#1a1a2e"
+        return hex_c if hex_c.startswith("#") else f"#{hex_c}"
+    except Exception:
+        return "#1a1a2e"
+
+
+def _gw_sign_jwt(payload: dict, private_key_pem: str) -> str:
+    """Signe un JWT Google Wallet avec RS256 via la lib cryptography."""
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
+
+    header = {"alg": "RS256", "typ": "JWT"}
+    h_enc = base64.urlsafe_b64encode(
+        json_lib.dumps(header, separators=(",", ":")).encode()
+    ).rstrip(b"=").decode()
+    p_enc = base64.urlsafe_b64encode(
+        json_lib.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode()
+    ).rstrip(b"=").decode()
+    msg = f"{h_enc}.{p_enc}"
+    key = serialization.load_pem_private_key(private_key_pem.encode(), password=None)
+    sig = key.sign(msg.encode(), asym_padding.PKCS1v15(), hashes.SHA256())
+    return f"{msg}.{base64.urlsafe_b64encode(sig).rstrip(b'=').decode()}"
+
+
+# ── 1. Google Wallet JWT ───────────────────────────────────────────────────────
+
+@router.get("/{card_id}/wallet/google")
+def get_google_wallet_jwt(card_id: str, user=Depends(get_current_user)):
+    """Retourne un JWT signé à passer à pay.google.com/gp/v/save/{jwt}."""
+    issuer_id   = os.getenv("GW_ISSUER_ID", "")
+    sa_email    = os.getenv("GW_SA_EMAIL", "")
+    private_key = os.getenv("GW_PRIVATE_KEY", "").replace("\\n", "\n")
+
+    if not issuer_id or not sa_email or not private_key:
+        raise HTTPException(
+            status_code=503,
+            detail="Google Wallet non configuré — ajoutez GW_ISSUER_ID, GW_SA_EMAIL, GW_PRIVATE_KEY dans Railway"
+        )
+
+    card_res = supabase.table("loyalty_cards")\
+        .select("*, merchants(business_name, stamps_required, points_required, reward_description, program_type, card_design)")\
+        .eq("id", card_id).eq("client_id", user["sub"]).execute()
+    if not card_res.data:
+        raise HTTPException(status_code=404, detail="Carte non trouvée")
+
+    card     = card_res.data[0]
+    merchant = card["merchants"]
+    is_points = merchant.get("program_type") == "points"
+    count    = (card.get("points_count") if is_points else card.get("stamps_count")) or 0
+    goal     = (merchant.get("points_required") if is_points else merchant.get("stamps_required")) or 10
+    hex_color = _card_primary_color(merchant)
+
+    mk = card["merchant_id"].replace("-", "")
+    ck = card_id.replace("-", "")
+    class_id  = f"{issuer_id}.m{mk}"
+    object_id = f"{issuer_id}.c{ck}"
+
+    loyalty_class = {
+        "id": class_id,
+        "issuerName": "Qarta",
+        "programName": merchant["business_name"],
+        "rewardsTierLabel": "Fidélité",
+        "hexBackgroundColor": hex_color,
+        "countryCode": "BE",
+        "reviewStatus": "UNDER_REVIEW",
+    }
+    loyalty_object = {
+        "id": object_id,
+        "classId": class_id,
+        "state": "ACTIVE",
+        "accountId": user["sub"],
+        "accountName": user.get("name", "Client"),
+        "loyaltyPoints": {
+            "balance": {"string": f"{count}/{goal}"},
+            "label": "Points" if is_points else "Tampons",
+        },
+        "textModulesData": [{
+            "header": "Récompense",
+            "body": merchant.get("reward_description", ""),
+            "id": "reward",
+        }],
+        "barcode": {"type": "QR_CODE", "value": card["qr_token"], "alternateText": ""},
+        "hexBackgroundColor": hex_color,
+    }
+
+    gw_payload = {
+        "iss": sa_email,
+        "aud": "google",
+        "typ": "savetowallet",
+        "iat": int(time.time()),
+        "payload": {"loyaltyClasses": [loyalty_class], "loyaltyObjects": [loyalty_object]},
+        "origins": [os.getenv("API_BASE_URL", "https://fidelitypass-production.up.railway.app")],
+    }
+
+    token = _gw_sign_jwt(gw_payload, private_key)
+    return {"jwt": token, "save_url": f"https://pay.google.com/gp/v/save/{token}"}
+
+
+# ── 2. Apple Wallet — URL signée (appelée par le client Flutter avec auth) ────
+
+@router.get("/{card_id}/wallet/apple-url")
+def get_apple_wallet_url(card_id: str, user=Depends(get_current_user)):
+    """Génère une URL .pkpass temporaire (5 min) pour iOS Safari."""
+    card_res = supabase.table("loyalty_cards").select("id")\
+        .eq("id", card_id).eq("client_id", user["sub"]).execute()
+    if not card_res.data:
+        raise HTTPException(status_code=404, detail="Carte non trouvée")
+
+    token = jwt.encode({
+        "card_id": card_id,
+        "client_id": user["sub"],
+        "exp": datetime.utcnow() + timedelta(minutes=5),
+    }, SECRET_KEY, algorithm="HS256")
+
+    base = os.getenv("API_BASE_URL", "https://fidelitypass-production.up.railway.app")
+    return {"url": f"{base}/cards/{card_id}/wallet/apple?t={token}"}
+
+
+# ── 3. Apple Wallet — génère le .pkpass (accès par token temporaire) ──────────
+
+@router.get("/{card_id}/wallet/apple")
+def get_apple_wallet_pass(card_id: str, t: str = Query(...)):
+    """Retourne le fichier .pkpass pour iOS (signé si certificat configuré)."""
+    try:
+        payload = jwt.decode(t, SECRET_KEY, algorithms=["HS256"])
+        if payload.get("card_id") != card_id:
+            raise ValueError("card_id mismatch")
+        client_id = payload["client_id"]
+    except Exception:
+        raise HTTPException(status_code=401, detail="Token invalide ou expiré")
+
+    card_res = supabase.table("loyalty_cards")\
+        .select("*, merchants(business_name, stamps_required, points_required, reward_description, program_type, card_design)")\
+        .eq("id", card_id).eq("client_id", client_id).execute()
+    if not card_res.data:
+        raise HTTPException(status_code=404, detail="Carte non trouvée")
+
+    card     = card_res.data[0]
+    merchant = card["merchants"]
+    is_points = merchant.get("program_type") == "points"
+    count    = (card.get("points_count") if is_points else card.get("stamps_count")) or 0
+    goal     = (merchant.get("points_required") if is_points else merchant.get("stamps_required")) or 10
+    hex_color = _card_primary_color(merchant)
+
+    pass_type_id = os.getenv("AW_PASS_TYPE_ID", "pass.com.qarta.loyalty")
+    team_id      = os.getenv("AW_TEAM_ID", "XXXXXXXXXX")
+
+    pass_dict = {
+        "formatVersion": 1,
+        "passTypeIdentifier": pass_type_id,
+        "serialNumber": card_id,
+        "teamIdentifier": team_id,
+        "organizationName": "Qarta",
+        "description": f"Carte fidélité {merchant['business_name']}",
+        "logoText": merchant["business_name"],
+        "backgroundColor": _hex_to_rgb(hex_color),
+        "foregroundColor": "rgb(255, 255, 255)",
+        "labelColor": "rgb(180, 180, 200)",
+        "storeCard": {
+            "primaryFields": [{
+                "key": "balance",
+                "label": "Points" if is_points else "Tampons",
+                "value": f"{count}/{goal}",
+            }],
+            "auxiliaryFields": [{
+                "key": "reward",
+                "label": "Récompense",
+                "value": merchant.get("reward_description", ""),
+            }],
+        },
+        "barcodes": [{
+            "message": card["qr_token"],
+            "format": "PKBarcodeFormatQR",
+            "messageEncoding": "iso-8859-1",
+        }],
+    }
+
+    pass_bytes = json_lib.dumps(pass_dict, ensure_ascii=False, indent=2).encode("utf-8")
+
+    files: dict[str, bytes] = {
+        "pass.json":  pass_bytes,
+        "icon.png":   _ICON_PNG,
+        "icon@2x.png": _ICON_PNG,
+    }
+    manifest = {name: hashlib.sha1(data).hexdigest() for name, data in files.items()}
+    manifest_bytes = json_lib.dumps(manifest).encode("utf-8")
+    files["manifest.json"] = manifest_bytes
+
+    # Signature (optionnel — nécessite AW_CERT_PEM + AW_KEY_PEM + AW_WWDR_PEM dans Railway)
+    cert_pem = os.getenv("AW_CERT_PEM", "").replace("\\n", "\n")
+    key_pem  = os.getenv("AW_KEY_PEM",  "").replace("\\n", "\n")
+    wwdr_pem = os.getenv("AW_WWDR_PEM", "").replace("\\n", "\n")
+
+    if cert_pem and key_pem:
+        try:
+            from cryptography.hazmat.primitives import serialization, hashes as cr_hashes
+            from cryptography import x509
+            from cryptography.hazmat.primitives.serialization import pkcs7 as pkcs7_ser
+
+            cert = x509.load_pem_x509_certificate(cert_pem.encode())
+            key  = serialization.load_pem_private_key(key_pem.encode(), password=None)
+            builder = pkcs7_ser.PKCS7SignatureBuilder()\
+                .set_data(manifest_bytes)\
+                .add_signer(cert, key, cr_hashes.SHA256())
+            if wwdr_pem:
+                builder = builder.add_certificate(
+                    x509.load_pem_x509_certificate(wwdr_pem.encode())
+                )
+            files["signature"] = builder.sign(
+                serialization.Encoding.DER,
+                [pkcs7_ser.PKCS7Options.DetachedSignature],
+            )
+        except Exception:
+            pass  # Pass sans signature → iOS refusera l'installation mais utile en dev
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, data in files.items():
+            zf.writestr(name, data)
+
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/vnd.apple.pkpass",
+        headers={"Content-Disposition": f"attachment; filename=qarta_{card_id[:8]}.pkpass"},
+    )
 
 
 @router.delete("/{card_id}")
