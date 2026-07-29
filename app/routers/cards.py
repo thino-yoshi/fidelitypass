@@ -1,10 +1,5 @@
 from fastapi import APIRouter, HTTPException, Depends, Query
-<<<<<<< HEAD
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import StreamingResponse, Response
-=======
-from fastapi.responses import StreamingResponse
->>>>>>> ad15cb084c03a1da62be55a97edc2e892d2d19ec
 from pydantic import BaseModel
 from app.database import supabase, SECRET_KEY
 from app.dependencies import get_current_user
