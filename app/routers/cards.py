@@ -583,13 +583,21 @@ def get_google_wallet_jwt(card_id: str, user=Depends(get_current_user)):
         )
 
     card_res = supabase.table("loyalty_cards")\
-        .select("*, merchants(business_name, stamps_required, points_required, reward_description, program_type, card_design)")\
+        .select("*, merchants(business_name, stamps_required, points_required, reward_description, program_type)")\
         .eq("id", card_id).eq("client_id", user["sub"]).execute()
     if not card_res.data:
         raise HTTPException(status_code=404, detail="Carte non trouvée")
 
     card     = card_res.data[0]
     merchant = card["merchants"]
+
+    try:
+        design_res = supabase.table("merchant_card_designs")\
+            .select("card_design").eq("merchant_id", card["merchant_id"]).execute()
+        merchant["card_design"] = design_res.data[0]["card_design"] if design_res.data else None
+    except Exception:
+        merchant["card_design"] = None
+
     is_points = merchant.get("program_type") == "points"
     count    = (card.get("points_count") if is_points else card.get("stamps_count")) or 0
     goal     = (merchant.get("points_required") if is_points else merchant.get("stamps_required")) or 10
@@ -675,13 +683,21 @@ def get_apple_wallet_pass(card_id: str, t: str = Query(...)):
         raise HTTPException(status_code=401, detail="Token invalide ou expiré")
 
     card_res = supabase.table("loyalty_cards")\
-        .select("*, merchants(business_name, stamps_required, points_required, reward_description, program_type, card_design)")\
+        .select("*, merchants(business_name, stamps_required, points_required, reward_description, program_type)")\
         .eq("id", card_id).eq("client_id", client_id).execute()
     if not card_res.data:
         raise HTTPException(status_code=404, detail="Carte non trouvée")
 
     card     = card_res.data[0]
     merchant = card["merchants"]
+
+    try:
+        design_res = supabase.table("merchant_card_designs")\
+            .select("card_design").eq("merchant_id", card["merchant_id"]).execute()
+        merchant["card_design"] = design_res.data[0]["card_design"] if design_res.data else None
+    except Exception:
+        merchant["card_design"] = None
+
     is_points = merchant.get("program_type") == "points"
     count    = (card.get("points_count") if is_points else card.get("stamps_count")) or 0
     goal     = (merchant.get("points_required") if is_points else merchant.get("stamps_required")) or 10
