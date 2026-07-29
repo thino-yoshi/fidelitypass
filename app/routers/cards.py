@@ -1,9 +1,14 @@
 from fastapi import APIRouter, HTTPException, Depends, Query
+<<<<<<< HEAD
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import StreamingResponse, Response
+=======
+from fastapi.responses import StreamingResponse
+>>>>>>> ad15cb084c03a1da62be55a97edc2e892d2d19ec
 from pydantic import BaseModel
 from app.database import supabase, SECRET_KEY
-from jose import jwt, JWTError
+from app.dependencies import get_current_user
+from jose import jwt
 import uuid
 import csv
 import io
@@ -16,14 +21,6 @@ import base64
 from datetime import datetime, timedelta, timezone
 
 router = APIRouter(tags=["Cards"])
-security = HTTPBearer()
-
-def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    try:
-        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=["HS256"])
-        return payload
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Token invalide")
 
 class CreateCardRequest(BaseModel):
     merchant_id: str
@@ -55,13 +52,44 @@ def join_via_static_qr(data: JoinMerchantRequest, user=Depends(get_current_user)
     if existing.data:
         return {"already_member": True, "card": existing.data[0], "merchant": merchant}
 
-    qr_token = str(uuid.uuid4())
-    card = supabase.table("loyalty_cards").insert({
-        "client_id": user["sub"],
-        "merchant_id": merchant_id,
-        "stamps_count": 0,
-        "qr_token": qr_token,
-    }).execute()
+    # ── Auto-sync auth.users → public.users si manquant ───────────────────────
+    # public.users a des colonnes NOT NULL : email, password_hash, user_type, name
+    # On fournit des valeurs par défaut pour éviter les violations de contraintes.
+    user_email = user.get("email") or f"user-{user['sub'][:8]}@qarta.local"
+    user_name = user_email.split("@")[0] if "@" in user_email else "Client"
+
+    try:
+        # Vérifier si l'utilisateur existe déjà dans public.users
+        existing_user = supabase.table("users").select("id").eq("id", user["sub"]).execute()
+        if not existing_user.data:
+            supabase.table("users").insert({
+                "id": user["sub"],
+                "email": user_email,
+                "user_type": "client",
+                "name": user_name,
+                "password_hash": "SUPABASE_AUTH",  # géré par Supabase Auth, pas par nous
+            }).execute()
+    except Exception as e:
+        # Logger l'erreur complète pour debugging
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erreur création profil utilisateur : {type(e).__name__}: {str(e)}"
+        )
+
+    # ── Créer la carte de fidélité ─────────────────────────────────────────────
+    try:
+        qr_token = str(uuid.uuid4())
+        card = supabase.table("loyalty_cards").insert({
+            "client_id": user["sub"],
+            "merchant_id": merchant_id,
+            "stamps_count": 0,
+            "qr_token": qr_token,
+        }).execute()
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erreur création carte : {type(e).__name__}: {str(e)}"
+        )
 
     return {"already_member": False, "card": card.data[0], "merchant": merchant}
 
@@ -84,9 +112,55 @@ def create_card(data: CreateCardRequest, user=Depends(get_current_user)):
 def get_my_cards(user=Depends(get_current_user), limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)):
     client_id = user["sub"]
     cards = supabase.table("loyalty_cards").select(
-        "*, merchants(business_name, category, stamps_required, reward_description, program_type, points_per_euro, points_required)"
+        "*, merchants(business_name, category, stamps_required, reward_description, program_type, "
+        "points_per_euro, points_required, address, phone, opening_hours, opening_days, website, description)"
     ).eq("client_id", client_id).range(offset, offset + limit - 1).execute()
-    return cards.data if cards.data else []
+
+    if not cards.data:
+        return []
+
+    # Récupérer les designs de cartes pour tous les commerçants en une seule requête
+    merchant_ids = list({c["merchant_id"] for c in cards.data if c.get("merchant_id")})
+    designs: dict = {}
+    if merchant_ids:
+        try:
+            design_res = supabase.table("merchant_card_designs") \
+                .select("merchant_id, card_design") \
+                .in_("merchant_id", merchant_ids) \
+                .execute()
+            designs = {d["merchant_id"]: d["card_design"] for d in (design_res.data or [])}
+        except Exception:
+            pass  # Pas bloquant si la table n'existe pas encore
+
+    # Embarquer le design dans chaque carte
+    for card in cards.data:
+        mid = card.get("merchant_id")
+        card["card_design"] = designs.get(mid)  # None si aucun design
+
+    # Récupérer le dernier scan par carte (une seule requête bulk)
+    card_ids = [c["id"] for c in cards.data]
+    last_scan_map: dict = {}
+    if card_ids:
+        try:
+            scan_res = supabase.table("scan_history") \
+                .select("card_id, scanned_at") \
+                .in_("card_id", card_ids) \
+                .order("scanned_at", desc=True) \
+                .execute()
+            for s in (scan_res.data or []):
+                cid = s["card_id"]
+                if cid not in last_scan_map:
+                    last_scan_map[cid] = s["scanned_at"]
+        except Exception:
+            pass
+
+    for card in cards.data:
+        card["last_scan_at"] = last_scan_map.get(card["id"])  # None si jamais scannée
+
+    # Trier : dernière utilisée en premier, jamais scannées à la fin
+    cards.data.sort(key=lambda c: c.get("last_scan_at") or "", reverse=True)
+
+    return cards.data
 
 @router.get("/qr/{card_id}")
 def get_dynamic_qr(card_id: str, user=Depends(get_current_user)):
@@ -117,17 +191,39 @@ def get_client_history(user=Depends(get_current_user)):
         .limit(100)\
         .execute()
 
-    results = []
-    for scan in res.data:
-        merchant_res = supabase.table("merchants")\
-            .select("business_name, category")\
-            .eq("id", scan["merchant_id"])\
+    # Batch-fetch merchants (évite N requêtes)
+    merchant_ids = list({s["merchant_id"] for s in (res.data or [])})
+    merchant_map: dict = {}
+    if merchant_ids:
+        m_res = supabase.table("merchants")\
+            .select("id, business_name, category, program_type, points_required")\
+            .in_("id", merchant_ids)\
             .execute()
-        merchant = merchant_res.data[0] if merchant_res.data else {}
-        scan["merchant"] = merchant
-        results.append(scan)
+        for m in (m_res.data or []):
+            merchant_map[m["id"]] = m
 
-    return results
+    # Calcul du delta par carte (ordre croissant → différence consécutive)
+    scans_asc = sorted(res.data or [], key=lambda x: x.get("scanned_at") or "")
+    prev_by_card: dict = {}
+    for scan in scans_asc:
+        merchant = merchant_map.get(scan["merchant_id"], {})
+        scan["merchant"] = merchant
+        program_type = merchant.get("program_type", "stamps")
+        if program_type == "points":
+            points_required = merchant.get("points_required") or 100
+            prev  = prev_by_card.get(scan["card_id"], 0)
+            curr  = scan.get("stamps_count") or 0
+            if scan.get("reward_reached"):
+                delta = max(0, (points_required - prev) + curr)
+            else:
+                delta = max(0, curr - prev)
+            scan["delta"] = delta
+            prev_by_card[scan["card_id"]] = curr
+        else:
+            scan["delta"] = 1
+
+    # Retour dans l'ordre décroissant (plus récent en premier)
+    return sorted(res.data or [], key=lambda x: x.get("scanned_at") or "", reverse=True)
 
 
 @router.get("/scan-history")
@@ -178,8 +274,41 @@ def get_merchant_clients(user=Depends(get_current_user), limit: int = Query(50, 
     return results
 
 
+@router.get("/{card_id}/poll")
+def poll_stamp(card_id: str, user=Depends(get_current_user)):
+    """Polling léger côté client : retourne l'état actuel + horodatage du dernier scan.
+    Le client compare le scanned_at au timestamp d'ouverture du QR modal pour détecter
+    un nouveau tampon — fiable même si points_count boucle sur la même valeur."""
+    if user["user_type"] != "client":
+        raise HTTPException(status_code=403, detail="Réservé aux clients")
+
+    card_res = supabase.table("loyalty_cards")\
+        .select("id, stamps_count, points_count, merchant_id")\
+        .eq("id", card_id)\
+        .eq("client_id", user["sub"])\
+        .execute()
+    if not card_res.data:
+        raise HTTPException(status_code=404, detail="Carte non trouvée")
+    card = card_res.data[0]
+
+    scan_res = supabase.table("scan_history")\
+        .select("stamps_count, reward_reached, scanned_at")\
+        .eq("card_id", card_id)\
+        .order("scanned_at", desc=True)\
+        .limit(1)\
+        .execute()
+    latest = scan_res.data[0] if scan_res.data else None
+
+    return {
+        "stamps_count": card.get("stamps_count") or 0,
+        "points_count": card.get("points_count") or 0,
+        "latest_scan_at":        latest["scanned_at"]     if latest else None,
+        "latest_reward_reached": latest.get("reward_reached", False) if latest else False,
+    }
+
+
 class AdjustStampRequest(BaseModel):
-    delta: int  # +1 ou -1
+    delta: int  # ex: +1, +3 (ajout) ou -1 (retrait)
 
 
 @router.post("/{card_id}/adjust-stamp")
@@ -187,8 +316,12 @@ def adjust_stamp(card_id: str, data: AdjustStampRequest, user=Depends(get_curren
     if user["user_type"] != "merchant":
         raise HTTPException(status_code=403, detail="Réservé aux commerçants")
 
-    if data.delta not in (1, -1):
-        raise HTTPException(status_code=400, detail="delta doit être 1 ou -1")
+    # Retrait : -1 uniquement. Ajout : jusqu'à 20 tampons (mode stamps) ou
+    # jusqu'à 100 000 points (mode points — ex: 10 000 € × 10 pts/€).
+    if data.delta == 0 or data.delta < -1:
+        raise HTTPException(status_code=400, detail="delta invalide (0 interdit, retrait = -1 uniquement)")
+    if data.delta > 100_000:
+        raise HTTPException(status_code=400, detail="delta trop élevé (max 100 000)")
 
     card_res = supabase.table("loyalty_cards")\
         .select("*")\
@@ -199,15 +332,43 @@ def adjust_stamp(card_id: str, data: AdjustStampRequest, user=Depends(get_curren
         raise HTTPException(status_code=404, detail="Carte non trouvée")
 
     card = card_res.data[0]
-    merchant_res = supabase.table("merchants").select("stamps_required").eq("id", user["sub"]).execute()
-    stamps_required = merchant_res.data[0]["stamps_required"] if merchant_res.data else 10
+    merchant_res = supabase.table("merchants").select("stamps_required, points_required, points_per_euro, reward_description, program_type").eq("id", user["sub"]).execute()
+    merchant = merchant_res.data[0] if merchant_res.data else {}
+    program_type = merchant.get("program_type") or "stamps"
+    reward_desc = merchant.get("reward_description") or "Récompense"
 
-    new_count = max(0, min(card["stamps_count"] + data.delta, stamps_required))
-    reward_reached = new_count >= stamps_required
+    if program_type == "points":
+        count_field = "points_count"
+        required = merchant.get("points_required") or 100
+        # Mode tampons : cap à 20 par ajout manuel
+    else:
+        count_field = "stamps_count"
+        required = merchant.get("stamps_required") or 10
+        if data.delta > 20:
+            raise HTTPException(status_code=400, detail="delta doit être entre 1 et 20 pour un programme tampons")
+
+    new_total = (card.get(count_field) or 0) + data.delta
+    if new_total < 0:
+        new_total = 0
+
+    # Récompense atteinte si l'ajout fait franchir le seuil. Chaque carte complétée
+    # crée une récompense (portefeuille) ; le reste repart sur une carte vierge.
+    reward_reached = data.delta > 0 and new_total >= required
+    completions = 0
     if reward_reached:
-        new_count = 0
+        completions = new_total // required
+        new_count = new_total % required  # surplus reporté sur la prochaine carte
+        reward_rows = [{
+            "client_id": card["client_id"],
+            "merchant_id": user["sub"],
+            "description": reward_desc,
+        } for _ in range(completions)]
+        if reward_rows:
+            supabase.table("rewards").insert(reward_rows).execute()
+    else:
+        new_count = min(new_total, required)
 
-    supabase.table("loyalty_cards").update({"stamps_count": new_count}).eq("id", card_id).execute()
+    supabase.table("loyalty_cards").update({count_field: new_count}).eq("id", card_id).execute()
 
     supabase.table("scan_history").insert({
         "merchant_id": user["sub"],
@@ -221,9 +382,32 @@ def adjust_stamp(card_id: str, data: AdjustStampRequest, user=Depends(get_curren
     return {
         "success": True,
         "stamps_count": new_count,
-        "stamps_required": stamps_required,
+        "stamps_required": required,
         "reward_reached": reward_reached,
+        "rewards_earned": completions,
     }
+
+
+class ClientNoteRequest(BaseModel):
+    note: str = ""
+
+
+@router.post("/{card_id}/note")
+def set_client_note(card_id: str, data: ClientNoteRequest, user=Depends(get_current_user)):
+    """Note privée du commerçant sur un client (stockée sur sa carte de fidélité)."""
+    if user["user_type"] != "merchant":
+        raise HTTPException(status_code=403, detail="Réservé aux commerçants")
+
+    card_res = supabase.table("loyalty_cards")\
+        .select("id")\
+        .eq("id", card_id)\
+        .eq("merchant_id", user["sub"])\
+        .execute()
+    if not card_res.data:
+        raise HTTPException(status_code=404, detail="Carte non trouvée")
+
+    supabase.table("loyalty_cards").update({"merchant_note": data.note.strip()}).eq("id", card_id).execute()
+    return {"success": True, "merchant_note": data.note.strip()}
 
 
 @router.get("/export-csv")
@@ -268,20 +452,35 @@ def get_daily_stats(user=Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="Réservé aux commerçants")
 
     since = (datetime.now(timezone.utc) - timedelta(days=29)).isoformat()
-    res = supabase.table("scan_history")\
-        .select("scanned_at, reward_reached")\
+
+    # Scans par jour
+    scan_res = supabase.table("scan_history")\
+        .select("scanned_at")\
         .eq("merchant_id", user["sub"])\
         .gte("scanned_at", since)\
         .execute()
 
-    daily = {}
-    for scan in res.data:
+    # Récompenses utilisées (redeemed) par jour — pas les atteintes non utilisées
+    reward_res = supabase.table("rewards")\
+        .select("redeemed_at")\
+        .eq("merchant_id", user["sub"])\
+        .gte("redeemed_at", since)\
+        .execute()
+
+    daily: dict = {}
+    for scan in (scan_res.data or []):
         day = scan["scanned_at"][:10]
         if day not in daily:
             daily[day] = {"scans": 0, "rewards": 0}
         daily[day]["scans"] += 1
-        if scan.get("reward_reached"):
-            daily[day]["rewards"] += 1
+
+    for reward in (reward_res.data or []):
+        if not reward.get("redeemed_at"):
+            continue
+        day = reward["redeemed_at"][:10]
+        if day not in daily:
+            daily[day] = {"scans": 0, "rewards": 0}
+        daily[day]["rewards"] += 1
 
     result = []
     for i in range(30):

@@ -7,7 +7,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from app.limiter import limiter
-from app.routers import auth, merchants, cards, scan, notifications, users
+from app.routers import auth, merchants, cards, scan, notifications, users, rewards
 from app.routers.notifications import send_due_notifications
 from app.logger import get_logger
 
@@ -48,6 +48,7 @@ app.include_router(cards.router, prefix="/cards", tags=["Cards"])
 app.include_router(scan.router, prefix="/scan", tags=["Scan"])
 app.include_router(notifications.router, prefix="/notifications", tags=["Notifications"])
 app.include_router(users.router, prefix="/users", tags=["Users"])
+app.include_router(rewards.router, prefix="/rewards", tags=["Rewards"])
 
 @app.get("/")
 def root():
