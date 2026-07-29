@@ -624,6 +624,10 @@ def get_google_wallet_jwt(card_id: str, user=Depends(get_current_user)):
 
     gw_base = "https://walletobjects.googleapis.com/walletobjects/v1"
 
+    logo_url = os.getenv(
+        "GW_LOGO_URL",
+        "https://storage.googleapis.com/wallet-lab-tools-codelab-artifacts-public/pass_google_logo.jpg",
+    )
     loyalty_class = {
         "id": class_id,
         "issuerName": "Qarta",
@@ -631,6 +635,12 @@ def get_google_wallet_jwt(card_id: str, user=Depends(get_current_user)):
         "reviewStatus": "UNDER_REVIEW",
         "hexBackgroundColor": hex_color,
         "countryCode": "BE",
+        "programLogo": {
+            "sourceUri": {"uri": logo_url},
+            "contentDescription": {
+                "defaultValue": {"language": "fr", "value": "Qarta"}
+            },
+        },
     }
     loyalty_object = {
         "id": object_id,
