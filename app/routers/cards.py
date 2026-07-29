@@ -626,7 +626,7 @@ def get_google_wallet_jwt(card_id: str, user=Depends(get_current_user)):
 
     logo_url = os.getenv(
         "GW_LOGO_URL",
-        "https://storage.googleapis.com/wallet-lab-tools-codelab-artifacts-public/pass_google_logo.jpg",
+        "https://fidelitypass-production.up.railway.app/app-logo.png",
     )
     loyalty_class = {
         "id": class_id,
