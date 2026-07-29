@@ -549,22 +549,14 @@ def _card_primary_color(merchant: dict) -> str:
         return "#1a1a2e"
 
 
-def _gw_sign_jwt(payload: dict, private_key_pem: str) -> str:
-    """Signe un JWT Google Wallet avec RS256 via la lib cryptography."""
-    from cryptography.hazmat.primitives import hashes, serialization
-    from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
+def _gw_sign_jwt(payload: dict, sa_email: str, private_key_pem: str) -> str:
+    """Signe un JWT Google Wallet avec RS256 via google-auth (lib officielle)."""
+    import google.auth.crypt
+    import google.auth.jwt
 
-    header = {"alg": "RS256", "typ": "JWT"}
-    h_enc = base64.urlsafe_b64encode(
-        json_lib.dumps(header, separators=(",", ":")).encode()
-    ).rstrip(b"=").decode()
-    p_enc = base64.urlsafe_b64encode(
-        json_lib.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode()
-    ).rstrip(b"=").decode()
-    msg = f"{h_enc}.{p_enc}"
-    key = serialization.load_pem_private_key(private_key_pem.encode(), password=None)
-    sig = key.sign(msg.encode(), asym_padding.PKCS1v15(), hashes.SHA256())
-    return f"{msg}.{base64.urlsafe_b64encode(sig).rstrip(b'=').decode()}"
+    signer = google.auth.crypt.RSASigner.from_string(private_key_pem, sa_email)
+    token = google.auth.jwt.encode(signer, payload)
+    return token.decode("utf-8") if isinstance(token, bytes) else token
 
 
 # ── 1. Google Wallet JWT ───────────────────────────────────────────────────────
@@ -645,7 +637,7 @@ def get_google_wallet_jwt(card_id: str, user=Depends(get_current_user)):
         "origins": [os.getenv("API_BASE_URL", "https://fidelitypass-production.up.railway.app")],
     }
 
-    token = _gw_sign_jwt(gw_payload, private_key)
+    token = _gw_sign_jwt(gw_payload, sa_email, private_key)
     return {"jwt": token, "save_url": f"https://pay.google.com/gp/v/save/{token}"}
 
 
