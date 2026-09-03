@@ -46,11 +46,15 @@ def _send_fcm_to_clients(
 
     # Filtre selon les préférences de chaque client
     def _allowed(u: dict) -> bool:
-        if u.get("notif_push") is False:
+        push    = u.get("notif_push")
+        offres  = u.get("notif_offres")
+        visites = u.get("notif_visites")
+        print(f"🔔 _allowed: push={push!r} ({type(push).__name__}) offres={offres!r} visites={visites!r} cat={notif_category}")
+        if push is False:
             return False
-        if notif_category == "offre" and u.get("notif_offres") is False:
+        if notif_category == "offre" and offres is False:
             return False
-        if notif_category == "visite" and not u.get("notif_visites", False):
+        if notif_category == "visite" and not visites:
             return False
         return True
 
