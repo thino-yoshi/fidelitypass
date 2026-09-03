@@ -32,25 +32,42 @@ def _send_fcm_to_clients(
     """Envoie une notification FCM à une liste de client_ids. Retourne le nb de succès."""
     if not client_ids:
         return 0
-    users_res = supabase.table("users")\
-        .select("id, fcm_token, notif_push, notif_offres, notif_visites")\
-        .in_("id", client_ids)\
-        .not_.is_("fcm_token", "null")\
-        .execute()
+    try:
+        users_res = supabase.table("users")\
+            .select("id, fcm_token, notif_push, notif_offres, notif_visites")\
+            .in_("id", client_ids)\
+            .not_.is_("fcm_token", "null")\
+            .execute()
+        users_data = users_res.data or []
+    except Exception as e:
+        print(f"⚠️ Erreur fetch prefs notif, fallback sans filtre: {e}")
+        users_data = []
+
+    # Fallback : si la requête a échoué, récupérer juste les tokens sans filtre
+    if not users_data:
+        try:
+            fallback = supabase.table("users")\
+                .select("id, fcm_token")\
+                .in_("id", client_ids)\
+                .not_.is_("fcm_token", "null")\
+                .execute()
+            users_data = fallback.data or []
+        except Exception as e:
+            print(f"❌ Erreur fetch tokens: {e}")
+            return 0
 
     # Filtre selon les préférences de chaque client
     def _allowed(u: dict) -> bool:
-        if not u.get("notif_push", True):
+        if u.get("notif_push") is False:
             return False
-        if notif_category == "offre" and not u.get("notif_offres", True):
+        if notif_category == "offre" and u.get("notif_offres") is False:
             return False
         if notif_category == "visite" and not u.get("notif_visites", False):
             return False
         return True
 
-    tokens = [u["fcm_token"] for u in users_res.data if u.get("fcm_token") and _allowed(u)]
-    # Garder uniquement les client_ids autorisés pour client_notifications
-    allowed_ids = {u["id"] for u in users_res.data if u.get("fcm_token") and _allowed(u)}
+    tokens = [u["fcm_token"] for u in users_data if u.get("fcm_token") and _allowed(u)]
+    allowed_ids = {u["id"] for u in users_data if u.get("fcm_token") and _allowed(u)}
     sent = 0
     for token in tokens:
         try:
