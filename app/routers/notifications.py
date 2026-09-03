@@ -37,6 +37,8 @@ def _send_fcm_to_clients(
             .select("id, fcm_token, notif_push, notif_offres, notif_visites")\
             .in_("id", client_ids)\
             .execute()
+        print(f"🔔 client_ids={client_ids}")
+        print(f"🔔 users_data raw={[(u.get('id'), u.get('notif_push'), u.get('notif_offres')) for u in (users_res.data or [])]}")
         users_data = [u for u in (users_res.data or []) if u.get("fcm_token")]
     except Exception as e:
         print(f"⚠️ Erreur fetch prefs notif: {e}")
@@ -106,11 +108,13 @@ class NotifPrefsPayload(BaseModel):
 async def update_notif_preferences(data: NotifPrefsPayload, user=Depends(get_current_user)):
     if user["user_type"] != "client":
         raise HTTPException(status_code=403, detail="Réservé aux clients")
-    supabase.table("users").update({
+    print(f"🔔 PUT /preferences → user_id={user['sub']} push={data.notif_push} offres={data.notif_offres}")
+    res = supabase.table("users").update({
         "notif_push":    data.notif_push,
         "notif_offres":  data.notif_offres,
         "notif_visites": data.notif_visites,
     }).eq("id", user["sub"]).execute()
+    print(f"🔔 update result rows={len(res.data or [])}")
     return {"message": "ok"}
 
 
