@@ -42,6 +42,8 @@ def _send_fcm_to_clients(
         print(f"⚠️ Erreur fetch prefs notif: {e}")
         users_data = []
 
+
+
     # Filtre selon les préférences de chaque client
     def _allowed(u: dict) -> bool:
         if u.get("notif_push") is False:
@@ -87,6 +89,25 @@ def _send_fcm_to_clients(
         print(f"❌ Erreur insertion client_notifications (batch): {e}")
 
     return sent
+
+
+# ── Préférences de notification ───────────────────────────────────────────────
+
+class NotifPrefsPayload(BaseModel):
+    notif_push: bool
+    notif_offres: bool
+    notif_visites: bool
+
+@router.put("/preferences")
+async def update_notif_preferences(data: NotifPrefsPayload, user=Depends(get_current_user)):
+    if user["user_type"] != "client":
+        raise HTTPException(status_code=403, detail="Réservé aux clients")
+    supabase.table("users").update({
+        "notif_push":    data.notif_push,
+        "notif_offres":  data.notif_offres,
+        "notif_visites": data.notif_visites,
+    }).eq("id", user["sub"]).execute()
+    return {"message": "ok"}
 
 
 # ── Broadcast ─────────────────────────────────────────────────────────────────
