@@ -30,6 +30,7 @@ def _send_fcm_to_clients(
     notif_category: str = "offre",  # "offre" | "visite" | "general"
 ) -> int:
     """Envoie une notification FCM à une liste de client_ids. Retourne le nb de succès."""
+    print(f"🔔 _send_fcm_to_clients: {len(client_ids)} client(s), category={notif_category}")
     if not client_ids:
         return 0
     try:
@@ -39,6 +40,7 @@ def _send_fcm_to_clients(
             .not_.is_("fcm_token", "null")\
             .execute()
         users_data = users_res.data or []
+        print(f"🔔 users_data: {len(users_data)} user(s) avec FCM token")
     except Exception as e:
         print(f"⚠️ Erreur fetch prefs notif, fallback sans filtre: {e}")
         users_data = []
@@ -68,6 +70,7 @@ def _send_fcm_to_clients(
 
     tokens = [u["fcm_token"] for u in users_data if u.get("fcm_token") and _allowed(u)]
     allowed_ids = {u["id"] for u in users_data if u.get("fcm_token") and _allowed(u)}
+    print(f"🔔 tokens après filtre: {len(tokens)}")
     sent = 0
     for token in tokens:
         try:
