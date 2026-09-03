@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 import time
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -53,3 +53,22 @@ app.include_router(rewards.router, prefix="/rewards", tags=["Rewards"])
 @app.get("/")
 def root():
     return {"message": "FidelityPass API is running !"}
+
+@app.get("/app-logo.png")
+def app_logo():
+    """Logo PNG 300×300 généré dynamiquement — utilisé par Google Wallet."""
+    import struct, zlib
+    w, h, r, g, b = 300, 300, 26, 26, 46  # #1a1a2e
+
+    def _chunk(name: bytes, data: bytes) -> bytes:
+        crc = zlib.crc32(name + data) & 0xFFFFFFFF
+        return struct.pack(">I", len(data)) + name + data + struct.pack(">I", crc)
+
+    raw = b"".join(b"\x00" + bytes([r, g, b] * w) for _ in range(h))
+    png = (
+        b"\x89PNG\r\n\x1a\n"
+        + _chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+        + _chunk(b"IDAT", zlib.compress(raw))
+        + _chunk(b"IEND", b"")
+    )
+    return Response(content=png, media_type="image/png")
