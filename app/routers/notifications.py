@@ -37,8 +37,6 @@ def _send_fcm_to_clients(
             .select("id, fcm_token, notif_push, notif_offres, notif_visites")\
             .in_("id", client_ids)\
             .execute()
-        print(f"🔔 client_ids={client_ids}")
-        print(f"🔔 users_data raw={[(u.get('id'), u.get('notif_push'), u.get('notif_offres')) for u in (users_res.data or [])]}")
         users_data = [u for u in (users_res.data or []) if u.get("fcm_token")]
     except Exception as e:
         print(f"⚠️ Erreur fetch prefs notif: {e}")
@@ -48,15 +46,11 @@ def _send_fcm_to_clients(
 
     # Filtre selon les préférences de chaque client
     def _allowed(u: dict) -> bool:
-        push    = u.get("notif_push")
-        offres  = u.get("notif_offres")
-        visites = u.get("notif_visites")
-        print(f"🔔 _allowed: push={push!r} ({type(push).__name__}) offres={offres!r} visites={visites!r} cat={notif_category}")
-        if push is False:
+        if u.get("notif_push") is False:
             return False
-        if notif_category == "offre" and offres is False:
+        if notif_category == "offre" and u.get("notif_offres") is False:
             return False
-        if notif_category == "visite" and not visites:
+        if notif_category == "visite" and not u.get("notif_visites"):
             return False
         return True
 
@@ -108,13 +102,11 @@ class NotifPrefsPayload(BaseModel):
 async def update_notif_preferences(data: NotifPrefsPayload, user=Depends(get_current_user)):
     if user["user_type"] != "client":
         raise HTTPException(status_code=403, detail="Réservé aux clients")
-    print(f"🔔 PUT /preferences → user_id={user['sub']} push={data.notif_push} offres={data.notif_offres}")
-    res = supabase.table("users").update({
+    supabase.table("users").update({
         "notif_push":    data.notif_push,
         "notif_offres":  data.notif_offres,
         "notif_visites": data.notif_visites,
     }).eq("id", user["sub"]).execute()
-    print(f"🔔 update result rows={len(res.data or [])}")
     return {"message": "ok"}
 
 
