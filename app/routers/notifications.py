@@ -27,16 +27,30 @@ def _send_fcm_to_clients(
     merchant_id: str,
     merchant_name: str,
     notif_type: str = "promo",
+    notif_category: str = "offre",  # "offre" | "visite" | "general"
 ) -> int:
     """Envoie une notification FCM à une liste de client_ids. Retourne le nb de succès."""
     if not client_ids:
         return 0
-    tokens_res = supabase.table("users")\
-        .select("fcm_token")\
+    users_res = supabase.table("users")\
+        .select("id, fcm_token, notif_push, notif_offres, notif_visites")\
         .in_("id", client_ids)\
         .not_.is_("fcm_token", "null")\
         .execute()
-    tokens = [u["fcm_token"] for u in tokens_res.data if u.get("fcm_token")]
+
+    # Filtre selon les préférences de chaque client
+    def _allowed(u: dict) -> bool:
+        if not u.get("notif_push", True):
+            return False
+        if notif_category == "offre" and not u.get("notif_offres", True):
+            return False
+        if notif_category == "visite" and not u.get("notif_visites", False):
+            return False
+        return True
+
+    tokens = [u["fcm_token"] for u in users_res.data if u.get("fcm_token") and _allowed(u)]
+    # Garder uniquement les client_ids autorisés pour client_notifications
+    allowed_ids = {u["id"] for u in users_res.data if u.get("fcm_token") and _allowed(u)}
     sent = 0
     for token in tokens:
         try:
@@ -50,7 +64,7 @@ def _send_fcm_to_clients(
         except Exception as e:
             print(f"❌ FCM error: {e}")
 
-    # Batch insert into client_notifications for all target clients
+    # Batch insert into client_notifications uniquement pour les clients autorisés
     try:
         records = [
             {
@@ -62,7 +76,7 @@ def _send_fcm_to_clients(
                 "type": notif_type,
                 "read": False,
             }
-            for client_id in client_ids
+            for client_id in client_ids if client_id in allowed_ids
         ]
         if records:
             supabase.table("client_notifications").insert(records).execute()
@@ -95,7 +109,7 @@ async def send_notification(data: NotificationPayload, user=Depends(get_current_
         return {"sent": 0, "message": "Aucun client à notifier"}
 
     client_ids = [c["client_id"] for c in cards.data]
-    sent = _send_fcm_to_clients(data.title, data.message, client_ids, user["sub"], merchant_name, "promo")
+    sent = _send_fcm_to_clients(data.title, data.message, client_ids, user["sub"], merchant_name, "promo", notif_category="offre")
     return {"sent": sent, "message": f"{sent} notification(s) envoyée(s)"}
 
 
@@ -141,7 +155,9 @@ async def send_targeted_notification(data: TargetedNotificationPayload, user=Dep
     if not target_client_ids:
         return {"sent": 0, "message": "Aucun client correspond aux critères"}
 
-    sent = _send_fcm_to_clients(data.title, data.message, target_client_ids, user["sub"], merchant_name, "targeted")
+    # inactive_days = rappel de visite, max_stamps_remaining = offre proche récompense
+    cat = "visite" if data.inactive_days is not None else "offre"
+    sent = _send_fcm_to_clients(data.title, data.message, target_client_ids, user["sub"], merchant_name, "targeted", notif_category=cat)
     return {"sent": sent, "total_targeted": len(target_client_ids), "message": f"{sent}/{len(target_client_ids)} notification(s) envoyée(s)"}
 
 
@@ -298,7 +314,9 @@ def send_due_notifications():
                     if not last_scan.data:
                         client_ids.append(card["client_id"])
 
-            sent = _send_fcm_to_clients(title, message, client_ids, merchant_id, merchant_name, "scheduled")
+            # broadcast/stamps = offre, inactive = visite
+            sched_cat = "visite" if filter_type == "inactive" else "offre"
+            sent = _send_fcm_to_clients(title, message, client_ids, merchant_id, merchant_name, "scheduled", notif_category=sched_cat)
             print(f"✅ Scheduled notif {notif['id']}: {sent} envoyée(s)")
 
             # Marquer comme envoyée
