@@ -834,7 +834,7 @@ def delete_card(card_id: str, user=Depends(get_current_user)):
 
     # Vérifier que la carte appartient bien à ce client
     card_res = supabase.table("loyalty_cards")\
-        .select("id")\
+        .select("id, merchant_id")\
         .eq("id", card_id)\
         .eq("client_id", user["sub"])\
         .execute()
@@ -842,8 +842,18 @@ def delete_card(card_id: str, user=Depends(get_current_user)):
     if not card_res.data:
         raise HTTPException(status_code=404, detail="Carte non trouvée")
 
+    merchant_id = card_res.data[0]["merchant_id"]
+
     # Supprimer l'historique de scan lié
     supabase.table("scan_history").delete().eq("card_id", card_id).execute()
+
+    # Supprimer les récompenses non utilisées liées à cette carte (client + commerçant)
+    supabase.table("rewards")\
+        .delete()\
+        .eq("client_id", user["sub"])\
+        .eq("merchant_id", merchant_id)\
+        .is_("redeemed_at", "null")\
+        .execute()
 
     # Supprimer la carte
     supabase.table("loyalty_cards").delete().eq("id", card_id).execute()
