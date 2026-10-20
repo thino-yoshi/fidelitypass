@@ -144,22 +144,27 @@ async def get_me(current_user=Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="Utilisateur non trouvé")
 
     user = result.data[0]
-    user["is_google"] = user.pop("password_hash", "") == "google_oauth"
+    ph = user.pop("password_hash", "") or ""
+    user["is_google"] = ph == "google_oauth"
+    user["is_oauth"]  = ph in ("google_oauth", "SUPABASE_AUTH")
     return user
 
 @router.patch("/me")
 async def update_profile(data: UpdateProfileRequest, current_user=Depends(get_current_user)):
-    """Modifier nom et/ou email — interdit pour les comptes Google."""
+    """Modifier nom et/ou email. L'email est interdit pour les comptes Google et Apple."""
     user_id = current_user["sub"]
 
-    # Vérifier que ce n'est pas un compte Google
     check = supabase.table("users").select("password_hash").eq("id", user_id).execute()
-    if check.data and check.data[0].get("password_hash") == "google_oauth":
-        raise HTTPException(status_code=403, detail="Impossible de modifier un compte Google")
+    password_hash = check.data[0].get("password_hash") if check.data else None
+    is_oauth = password_hash in ("google_oauth", "SUPABASE_AUTH")
 
     updates = {}
-    if data.name:  updates["name"]  = data.name.strip()
-    if data.email: updates["email"] = data.email.strip().lower()
+    if data.name:
+        updates["name"] = data.name.strip()
+    if data.email:
+        if is_oauth:
+            raise HTTPException(status_code=403, detail="Impossible de modifier l'email d'un compte Google ou Apple")
+        updates["email"] = data.email.strip().lower()
     if not updates:
         raise HTTPException(status_code=400, detail="Aucune donnée à mettre à jour")
 
