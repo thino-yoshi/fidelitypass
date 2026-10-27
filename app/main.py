@@ -17,7 +17,7 @@ scheduler = AsyncIOScheduler()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    scheduler.add_job(send_due_notifications, "interval", minutes=1, id="notif_scheduler")
+    scheduler.add_job(send_due_notifications, "interval", minutes=5, id="notif_scheduler", max_instances=1, coalesce=True)
     scheduler.start()
     yield
     scheduler.shutdown()

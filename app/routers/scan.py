@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
 from typing import Optional
-from app.database import supabase, SECRET_KEY
+from app.database import supabase, db, SECRET_KEY
 from app.dependencies import get_current_user
 from app.limiter import limiter
 from app.logger import get_logger
@@ -36,7 +36,7 @@ def resolve_qr(request: Request, data: ResolveRequest, user=Depends(get_current_
     # ── Cas RÉCOMPENSE ──────────────────────────────────────────────────────────
     if decoded and decoded.get("type") == "reward":
         reward_id = decoded.get("reward_id")
-        rres = supabase.table("rewards").select("*").eq("id", reward_id).execute()
+        rres = db.table("rewards").select("*").eq("id", reward_id).execute()
         if not rres.data:
             raise HTTPException(status_code=404, detail="Récompense introuvable")
         rw = rres.data[0]
@@ -44,7 +44,7 @@ def resolve_qr(request: Request, data: ResolveRequest, user=Depends(get_current_
             raise HTTPException(status_code=403, detail="Cette récompense n'est pas pour votre commerce")
         if rw.get("redeemed_at"):
             raise HTTPException(status_code=400, detail="Récompense déjà utilisée")
-        client_res = supabase.table("users").select("name, email").eq("id", rw["client_id"]).execute()
+        client_res = db.table("users").select("name, email").eq("id", rw["client_id"]).execute()
         client = client_res.data[0] if client_res.data else {}
         return {
             "kind":        "reward",
@@ -56,15 +56,15 @@ def resolve_qr(request: Request, data: ResolveRequest, user=Depends(get_current_
 
     # ── Cas TAMPON (carte) ──────────────────────────────────────────────────────
     real_qr_token = decoded.get("qr_token", data.qr_token) if decoded else data.qr_token
-    res = supabase.table("loyalty_cards").select("*").eq("qr_token", real_qr_token).execute()
+    res = db.table("loyalty_cards").select("*").eq("qr_token", real_qr_token).execute()
     if not res.data:
         raise HTTPException(status_code=404, detail="QR code invalide ou expiré")
     card = res.data[0]
     if card["merchant_id"] != user["sub"]:
         raise HTTPException(status_code=403, detail="Cette carte n'appartient pas à votre commerce")
 
-    merchant = supabase.table("merchants").select("*").eq("id", user["sub"]).execute().data[0]
-    client_res = supabase.table("users").select("name, email, profile_picture_url").eq("id", card["client_id"]).execute()
+    merchant = db.table("merchants").select("*").eq("id", user["sub"]).execute().data[0]
+    client_res = db.table("users").select("name, email, profile_picture_url").eq("id", card["client_id"]).execute()
     client = client_res.data[0] if client_res.data else {}
 
     program_type = merchant.get("program_type", "stamps")
@@ -101,7 +101,7 @@ def scan_qr(request: Request, data: ScanRequest, user=Depends(get_current_user))
         # Pas un JWT → on utilise le token tel quel (rétro-compatibilité)
         pass
 
-    res = supabase.table("loyalty_cards").select("*").eq("qr_token", real_qr_token).execute()
+    res = db.table("loyalty_cards").select("*").eq("qr_token", real_qr_token).execute()
     if not res.data:
         raise HTTPException(status_code=404, detail="QR code invalide ou expiré")
 
@@ -110,7 +110,7 @@ def scan_qr(request: Request, data: ScanRequest, user=Depends(get_current_user))
     if card["merchant_id"] != user["sub"]:
         raise HTTPException(status_code=403, detail="Cette carte n'appartient pas à votre commerce")
 
-    merchant_res = supabase.table("merchants").select("*").eq("id", user["sub"]).execute()
+    merchant_res = db.table("merchants").select("*").eq("id", user["sub"]).execute()
     merchant = merchant_res.data[0]
 
     program_type = merchant.get("program_type", "stamps")
@@ -130,9 +130,9 @@ def scan_qr(request: Request, data: ScanRequest, user=Depends(get_current_user))
         if reward_reached:
             new_points = new_points % points_required  # surplus reporté
 
-        supabase.table("loyalty_cards").update({"points_count": new_points}).eq("id", card["id"]).execute()
+        db.table("loyalty_cards").update({"points_count": new_points}).eq("id", card["id"]).execute()
 
-        supabase.table("scan_history").insert({
+        db.table("scan_history").insert({
             "merchant_id": user["sub"],
             "client_id": card["client_id"],
             "card_id": card["id"],
@@ -151,7 +151,7 @@ def scan_qr(request: Request, data: ScanRequest, user=Depends(get_current_user))
             notif_type = "points"
 
         try:
-            supabase.table("client_notifications").insert({
+            db.table("client_notifications").insert({
                 "client_id": card["client_id"],
                 "merchant_id": user["sub"],
                 "merchant_name": merchant["business_name"],
@@ -183,9 +183,9 @@ def scan_qr(request: Request, data: ScanRequest, user=Depends(get_current_user))
     if reward_reached:
         new_count = 0
 
-    supabase.table("loyalty_cards").update({"stamps_count": new_count}).eq("id", card["id"]).execute()
+    db.table("loyalty_cards").update({"stamps_count": new_count}).eq("id", card["id"]).execute()
 
-    supabase.table("scan_history").insert({
+    db.table("scan_history").insert({
         "merchant_id": user["sub"],
         "client_id": card["client_id"],
         "card_id": card["id"],
@@ -204,7 +204,7 @@ def scan_qr(request: Request, data: ScanRequest, user=Depends(get_current_user))
         notif_body = f"{new_count}/{merchant['stamps_required']} tampons. Plus que {remaining} pour ta récompense !"
 
     try:
-        supabase.table("client_notifications").insert({
+        db.table("client_notifications").insert({
             "client_id": card["client_id"],
             "merchant_id": user["sub"],
             "merchant_name": merchant["business_name"],

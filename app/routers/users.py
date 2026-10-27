@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from pydantic import BaseModel
 from app.dependencies import get_current_user
-from app.database import supabase
+from app.database import supabase, db
 import bcrypt
 import time
 
@@ -24,7 +24,7 @@ class UpdateProfileRequest(BaseModel):
 @router.put("/fcm-token")
 def update_fcm_token(data: FCMTokenUpdate, user=Depends(get_current_user)):
     # Upsert : crée la ligne si elle n'existe pas encore (nouveaux users Supabase Auth)
-    supabase.table("users").upsert(
+    db.table("users").upsert(
         {
             "id":        user["sub"],
             "email":     user.get("email", ""),
@@ -37,7 +37,7 @@ def update_fcm_token(data: FCMTokenUpdate, user=Depends(get_current_user)):
 
 @router.put("/change-password")
 def change_password(data: ChangePasswordRequest, user=Depends(get_current_user)):
-    user_res = supabase.table("users").select("password_hash").eq("id", user["sub"]).execute()
+    user_res = db.table("users").select("password_hash").eq("id", user["sub"]).execute()
     if not user_res.data:
         raise HTTPException(status_code=404, detail="Utilisateur non trouvé")
 
@@ -52,12 +52,12 @@ def change_password(data: ChangePasswordRequest, user=Depends(get_current_user))
         raise HTTPException(status_code=400, detail="Le nouveau mot de passe doit faire au moins 6 caractères")
 
     new_hash = bcrypt.hashpw(data.new_password.encode(), bcrypt.gensalt()).decode()
-    supabase.table("users").update({"password_hash": new_hash}).eq("id", user["sub"]).execute()
+    db.table("users").update({"password_hash": new_hash}).eq("id", user["sub"]).execute()
     return {"message": "Mot de passe mis à jour"}
 
 @router.delete("/account")
 def delete_account(data: DeleteAccountRequest, user=Depends(get_current_user)):
-    user_res = supabase.table("users").select("password_hash").eq("id", user["sub"]).execute()
+    user_res = db.table("users").select("password_hash").eq("id", user["sub"]).execute()
     if not user_res.data:
         raise HTTPException(status_code=404, detail="Utilisateur non trouvé")
 
@@ -66,13 +66,8 @@ def delete_account(data: DeleteAccountRequest, user=Depends(get_current_user)):
         if not bcrypt.checkpw(data.password.encode(), stored_hash.encode()):
             raise HTTPException(status_code=401, detail="Mot de passe incorrect")
 
-    # Supprimer les données liées
-    cards_res = supabase.table("loyalty_cards").select("id").eq("client_id", user["sub"]).execute()
-    card_ids = [c["id"] for c in cards_res.data]
-    for card_id in card_ids:
-        supabase.table("scan_history").delete().eq("card_id", card_id).execute()
-    supabase.table("loyalty_cards").delete().eq("client_id", user["sub"]).execute()
-    supabase.table("users").delete().eq("id", user["sub"]).execute()
+    # ON DELETE CASCADE gère la suppression des données liées
+    db.table("users").delete().eq("id", user["sub"]).execute()
 
     return {"message": "Compte supprimé"}
 
@@ -118,7 +113,7 @@ async def upload_profile_picture(
     public_url = f"{raw_url}?v={int(time.time())}"
 
     # Mise à jour en base
-    db_res = supabase.table("users").update(
+    db_res = db.table("users").update(
         {"profile_picture_url": public_url}
     ).eq("id", user_id).execute()
 
@@ -136,12 +131,30 @@ async def get_me(current_user=Depends(get_current_user)):
     """Get the current user's profile, including profile_picture_url and is_google."""
     user_id = current_user["sub"]
     try:
-        result = supabase.table("users").select("id, name, email, role, profile_picture_url, password_hash").eq("id", user_id).execute()
+        result = db.table("users").select("id, name, email, profile_picture_url, password_hash").eq("id", user_id).execute()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erreur base de données: {str(e)}")
 
     if not result.data:
-        raise HTTPException(status_code=404, detail="Utilisateur non trouvé")
+        # Première connexion OAuth (Google/Apple) : créer l'utilisateur dans Neon
+        email = current_user.get("email") or ""
+        name = email.split("@")[0] if email else "Utilisateur"
+        try:
+            new = db.table("users").insert({
+                "id": user_id,
+                "email": email,
+                "name": name,
+                "user_type": current_user.get("user_type", "client"),
+                "password_hash": "SUPABASE_AUTH",
+            }).execute()
+            result_data = new.data[0] if new.data else {"id": user_id, "email": email, "name": name, "profile_picture_url": None}
+        except Exception:
+            raise HTTPException(status_code=404, detail="Utilisateur non trouvé")
+        user = result_data
+        user.pop("password_hash", None)
+        user["is_google"] = False
+        user["is_oauth"]  = True
+        return user
 
     user = result.data[0]
     ph = user.pop("password_hash", "") or ""
@@ -154,7 +167,7 @@ async def update_profile(data: UpdateProfileRequest, current_user=Depends(get_cu
     """Modifier nom et/ou email. L'email est interdit pour les comptes Google et Apple."""
     user_id = current_user["sub"]
 
-    check = supabase.table("users").select("password_hash").eq("id", user_id).execute()
+    check = db.table("users").select("password_hash").eq("id", user_id).execute()
     password_hash = check.data[0].get("password_hash") if check.data else None
     is_oauth = password_hash in ("google_oauth", "SUPABASE_AUTH")
 
@@ -168,7 +181,7 @@ async def update_profile(data: UpdateProfileRequest, current_user=Depends(get_cu
     if not updates:
         raise HTTPException(status_code=400, detail="Aucune donnée à mettre à jour")
 
-    res = supabase.table("users").update(updates).eq("id", user_id).execute()
+    res = db.table("users").update(updates).eq("id", user_id).execute()
     if not res.data:
         raise HTTPException(status_code=500, detail="Erreur mise à jour")
     return {"message": "Profil mis à jour", **updates}

@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
-from app.database import supabase, SECRET_KEY
+from app.database import supabase, db, SECRET_KEY
 from app.limiter import limiter
 from app.logger import get_logger
 import bcrypt
@@ -50,7 +50,7 @@ def create_token(user_id: str, user_type: str):
 @router.post("/register")
 @limiter.limit("10/minute")
 def register(request: Request, data: RegisterRequest):
-    existing = supabase.table("users").select("id").eq("email", data.email).execute()
+    existing = db.table("users").select("id").eq("email", data.email).execute()
     if existing.data:
         raise HTTPException(status_code=400, detail="Email déjà utilisé")
 
@@ -58,20 +58,20 @@ def register(request: Request, data: RegisterRequest):
     if data.user_type == "merchant":
         if not data.merchant_code:
             raise HTTPException(status_code=400, detail="Code commerçant requis")
-        
-        code_res = supabase.table("merchant_codes")\
+
+        code_res = db.table("merchant_codes")\
             .select("*")\
             .eq("code", data.merchant_code.upper())\
             .eq("email", data.email.lower())\
             .eq("used", False)\
             .execute()
-        
+
         if not code_res.data:
             raise HTTPException(status_code=400, detail="Code commerçant invalide, expiré ou déjà utilisé")
 
     password_hash = bcrypt.hashpw(data.password.encode(), bcrypt.gensalt()).decode()
 
-    user = supabase.table("users").insert({
+    user = db.table("users").insert({
         "email": data.email,
         "password_hash": password_hash,
         "user_type": data.user_type,
@@ -82,7 +82,7 @@ def register(request: Request, data: RegisterRequest):
 
     # Marquer le code comme utilisé si commerçant
     if data.user_type == "merchant":
-        supabase.table("merchant_codes")\
+        db.table("merchant_codes")\
             .update({"used": True, "used_at": datetime.utcnow().isoformat()})\
             .eq("code", data.merchant_code.upper())\
             .execute()
@@ -94,7 +94,7 @@ def register(request: Request, data: RegisterRequest):
 @router.post("/login")
 @limiter.limit("10/minute")
 def login(request: Request, data: LoginRequest):
-    user = supabase.table("users").select("*").eq("email", data.email).execute()
+    user = db.table("users").select("*").eq("email", data.email).execute()
 
     if not user.data:
         raise HTTPException(status_code=401, detail="Email ou mot de passe incorrect")
@@ -120,12 +120,12 @@ def google_login(request: Request, data: GoogleAuthRequest):
         email = idinfo['email']
         name = idinfo.get('name', email)
 
-        existing = supabase.table("users").select("*").eq("email", email).execute()
+        existing = db.table("users").select("*").eq("email", email).execute()
 
         if existing.data:
             user = existing.data[0]
         else:
-            new_user = supabase.table("users").insert({
+            new_user = db.table("users").insert({
                 "email": email,
                 "name": name,
                 "user_type": "client",
@@ -156,7 +156,7 @@ def generate_merchant_code(request: Request, data: MerchantCodeRequest):
     alphabet = string.ascii_uppercase + string.digits
     code = ''.join(secrets.choice(alphabet) for _ in range(8))
 
-    supabase.table("merchant_codes").insert({
+    db.table("merchant_codes").insert({
         "code": code,
         "email": data.email,
         "used": False
@@ -166,7 +166,7 @@ def generate_merchant_code(request: Request, data: MerchantCodeRequest):
 
 @router.post("/validate-merchant-code")
 def validate_merchant_code(data: ValidateCodeRequest):
-    res = supabase.table("merchant_codes")\
+    res = db.table("merchant_codes")\
         .select("*")\
         .eq("code", data.code.upper())\
         .eq("email", data.email.lower())\

@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel
-from app.database import supabase
+from app.database import supabase, db
 from app.dependencies import get_current_user
 import uuid
 
@@ -21,7 +21,7 @@ class RewardPayload(BaseModel):
 
 @router.get("/")
 def get_merchants(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)):
-    res = supabase.table("merchants").select("*").range(offset, offset + limit - 1).execute()
+    res = db.table("merchants").select("*").range(offset, offset + limit - 1).execute()
     return res.data
 
 @router.get("/me")
@@ -30,7 +30,7 @@ def get_my_merchant_profile(user=Depends(get_current_user)):
     if user["user_type"] != "merchant":
         raise HTTPException(status_code=403, detail="Réservé aux commerçants")
     try:
-        res = supabase.table("merchants").select("*").eq("id", user["sub"]).execute()
+        res = db.table("merchants").select("*").eq("id", user["sub"]).execute()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erreur base de données : {str(e)}")
     if not res.data:
@@ -43,7 +43,7 @@ def setup_merchant(data: MerchantCreate, user=Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="Réservé aux commerçants")
     
     # Vérifier si le commerçant existe déjà
-    existing = supabase.table("merchants").select("id").eq("id", user["sub"]).execute()
+    existing = db.table("merchants").select("id").eq("id", user["sub"]).execute()
     
     fields = {
         "business_name": data.business_name,
@@ -57,10 +57,10 @@ def setup_merchant(data: MerchantCreate, user=Depends(get_current_user)):
 
     if existing.data:
         # Mettre à jour
-        res = supabase.table("merchants").update(fields).eq("id", user["sub"]).execute()
+        res = db.table("merchants").update(fields).eq("id", user["sub"]).execute()
     else:
         # Créer
-        res = supabase.table("merchants").insert({"id": user["sub"], **fields}).execute()
+        res = db.table("merchants").insert({"id": user["sub"], **fields}).execute()
 
     return res.data[0]
 
@@ -81,7 +81,7 @@ def update_merchant_info(data: MerchantInfo, user=Depends(get_current_user)):
     if user["user_type"] != "merchant":
         raise HTTPException(status_code=403, detail="Réservé aux commerçants")
 
-    existing = supabase.table("merchants").select("id").eq("id", user["sub"]).execute()
+    existing = db.table("merchants").select("id").eq("id", user["sub"]).execute()
     if not existing.data:
         raise HTTPException(status_code=404, detail="Profil commerçant non trouvé — configurez votre commerce sur qarta.be")
 
@@ -94,7 +94,7 @@ def update_merchant_info(data: MerchantInfo, user=Depends(get_current_user)):
         "opening_hours": data.opening_hours,
         "description": data.description.strip(),
     }
-    res = supabase.table("merchants").update(fields).eq("id", user["sub"]).execute()
+    res = db.table("merchants").update(fields).eq("id", user["sub"]).execute()
     return res.data[0]
 
 
@@ -108,15 +108,15 @@ def save_card_design(data: CardDesignPayload, user=Depends(get_current_user)):
     if user["user_type"] != "merchant":
         raise HTTPException(status_code=403, detail="Réservé aux commerçants")
 
-    existing = supabase.table("merchant_card_designs") \
+    existing = db.table("merchant_card_designs") \
         .select("id").eq("merchant_id", user["sub"]).execute()
 
     if existing.data:
-        res = supabase.table("merchant_card_designs") \
+        res = db.table("merchant_card_designs") \
             .update({"card_design": data.card_design}) \
             .eq("merchant_id", user["sub"]).execute()
     else:
-        res = supabase.table("merchant_card_designs") \
+        res = db.table("merchant_card_designs") \
             .insert({"merchant_id": user["sub"], "card_design": data.card_design}) \
             .execute()
 
@@ -129,7 +129,7 @@ def get_card_design(user=Depends(get_current_user)):
     if user["user_type"] != "merchant":
         raise HTTPException(status_code=403, detail="Réservé aux commerçants")
 
-    res = supabase.table("merchant_card_designs")\
+    res = db.table("merchant_card_designs")\
         .select("card_design, updated_at")\
         .eq("merchant_id", user["sub"])\
         .execute()
@@ -145,14 +145,14 @@ def get_static_qr(user=Depends(get_current_user)):
     if user["user_type"] != "merchant":
         raise HTTPException(status_code=403, detail="Réservé aux commerçants")
 
-    merchant_res = supabase.table("merchants").select("static_qr_token").eq("id", user["sub"]).execute()
+    merchant_res = db.table("merchants").select("static_qr_token").eq("id", user["sub"]).execute()
     if not merchant_res.data:
         raise HTTPException(status_code=404, detail="Commerçant non trouvé")
 
     token = merchant_res.data[0].get("static_qr_token")
     if not token:
         token = str(uuid.uuid4())
-        supabase.table("merchants").update({"static_qr_token": token}).eq("id", user["sub"]).execute()
+        db.table("merchants").update({"static_qr_token": token}).eq("id", user["sub"]).execute()
 
     return {"static_qr_token": token}
 
@@ -162,7 +162,7 @@ def get_merchant_rewards(user=Depends(get_current_user)):
     if user["user_type"] != "merchant":
         raise HTTPException(status_code=403, detail="Réservé aux commerçants")
 
-    res = supabase.table("merchant_rewards").select("*").eq("merchant_id", user["sub"]).order("stamps_required").execute()
+    res = db.table("merchant_rewards").select("*").eq("merchant_id", user["sub"]).order("stamps_required").execute()
     return res.data
 
 
@@ -177,7 +177,7 @@ def create_merchant_reward(data: RewardPayload, user=Depends(get_current_user)):
     if not data.description.strip():
         raise HTTPException(status_code=400, detail="La description ne peut pas être vide")
 
-    existing = supabase.table("merchant_rewards").select("id", "stamps_required").eq("merchant_id", user["sub"]).execute()
+    existing = db.table("merchant_rewards").select("id", "stamps_required").eq("merchant_id", user["sub"]).execute()
 
     if len(existing.data) >= 5:
         raise HTTPException(status_code=400, detail="Vous ne pouvez pas avoir plus de 5 récompenses")
@@ -186,7 +186,7 @@ def create_merchant_reward(data: RewardPayload, user=Depends(get_current_user)):
     if data.stamps_required in used_stamps:
         raise HTTPException(status_code=400, detail="Une récompense avec ce nombre de tampons existe déjà")
 
-    res = supabase.table("merchant_rewards").insert({
+    res = db.table("merchant_rewards").insert({
         "merchant_id": user["sub"],
         "stamps_required": data.stamps_required,
         "description": data.description.strip()
@@ -200,11 +200,11 @@ def delete_merchant_reward(reward_id: str, user=Depends(get_current_user)):
     if user["user_type"] != "merchant":
         raise HTTPException(status_code=403, detail="Réservé aux commerçants")
 
-    existing = supabase.table("merchant_rewards").select("id").eq("id", reward_id).eq("merchant_id", user["sub"]).execute()
+    existing = db.table("merchant_rewards").select("id").eq("id", reward_id).eq("merchant_id", user["sub"]).execute()
     if not existing.data:
         raise HTTPException(status_code=404, detail="Récompense non trouvée")
 
-    supabase.table("merchant_rewards").delete().eq("id", reward_id).execute()
+    db.table("merchant_rewards").delete().eq("id", reward_id).execute()
 
     return {"message": "Récompense supprimée"}
 
@@ -212,7 +212,7 @@ def delete_merchant_reward(reward_id: str, user=Depends(get_current_user)):
 # ⚠️ Route générique TOUJOURS en dernier — sinon elle capture /me, /me/static-qr, etc.
 @router.get("/{merchant_id}")
 def get_merchant(merchant_id: str):
-    res = supabase.table("merchants").select("*").eq("id", merchant_id).execute()
+    res = db.table("merchants").select("*").eq("id", merchant_id).execute()
     if not res.data:
         raise HTTPException(status_code=404, detail="Commerçant non trouvé")
     return res.data[0]

@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from datetime import datetime, timedelta, timezone
 from jose import jwt, JWTError
-from app.database import supabase, SECRET_KEY
+from app.database import supabase, db, SECRET_KEY
 from app.dependencies import get_current_user
 
 router = APIRouter(tags=["Rewards"])
@@ -17,7 +17,7 @@ def my_rewards(user=Depends(get_current_user)):
     """Récompenses DISPONIBLES (non utilisées) du client, triées de la plus
     ancienne à la plus récente (FIFO), enrichies du nom du magasin."""
     res = (
-        supabase.table("rewards")
+        db.table("rewards")
         .select("*")
         .eq("client_id", user["sub"])
         .is_("redeemed_at", "null")
@@ -28,12 +28,12 @@ def my_rewards(user=Depends(get_current_user)):
     merchant_ids = list({r["merchant_id"] for r in rewards})
     merchants, designs = {}, {}
     if merchant_ids:
-        m = (supabase.table("merchants")
+        m = (db.table("merchants")
              .select("id, business_name, stamps_required, points_required, program_type, reward_description")
              .in_("id", merchant_ids).execute())
         merchants = {x["id"]: x for x in (m.data or [])}
         try:
-            d = (supabase.table("merchant_card_designs")
+            d = (db.table("merchant_card_designs")
                  .select("merchant_id, card_design")
                  .in_("merchant_id", merchant_ids).execute())
             designs = {x["merchant_id"]: x["card_design"] for x in (d.data or [])}
@@ -50,7 +50,7 @@ def my_rewards(user=Depends(get_current_user)):
 @router.get("/{reward_id}/qr")
 def reward_qr(reward_id: str, user=Depends(get_current_user)):
     """Génère un QR dynamique (JWT 120s) pour faire valider la récompense au commerce."""
-    res = supabase.table("rewards").select("*").eq("id", reward_id).eq("client_id", user["sub"]).execute()
+    res = db.table("rewards").select("*").eq("id", reward_id).eq("client_id", user["sub"]).execute()
     if not res.data:
         raise HTTPException(status_code=404, detail="Récompense introuvable")
     r = res.data[0]
@@ -81,7 +81,7 @@ def redeem_reward(data: RedeemRequest, user=Depends(get_current_user)):
         raise HTTPException(status_code=400, detail="Ce QR n'est pas une récompense")
 
     reward_id = decoded.get("reward_id")
-    res = supabase.table("rewards").select("*").eq("id", reward_id).execute()
+    res = db.table("rewards").select("*").eq("id", reward_id).execute()
     if not res.data:
         raise HTTPException(status_code=404, detail="Récompense introuvable")
     r = res.data[0]
@@ -90,11 +90,11 @@ def redeem_reward(data: RedeemRequest, user=Depends(get_current_user)):
     if r.get("redeemed_at"):
         raise HTTPException(status_code=400, detail="Récompense déjà utilisée")
 
-    supabase.table("rewards").update(
+    db.table("rewards").update(
         {"redeemed_at": datetime.now(timezone.utc).isoformat()}
     ).eq("id", reward_id).execute()
 
-    client = supabase.table("users").select("name, email").eq("id", r["client_id"]).execute().data
+    client = db.table("users").select("name, email").eq("id", r["client_id"]).execute().data
     cname = (client[0].get("name") or client[0].get("email")) if client else "Client"
 
     return {

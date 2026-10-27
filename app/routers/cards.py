@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends, Query
 from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel
-from app.database import supabase, SECRET_KEY
+from app.database import supabase, db, SECRET_KEY
 from app.dependencies import get_current_user
 from jose import jwt
 import uuid
@@ -28,7 +28,7 @@ def join_via_static_qr(data: JoinMerchantRequest, user=Depends(get_current_user)
     if user.get("user_type", "client") != "client":
         raise HTTPException(status_code=403, detail="Réservé aux clients")
 
-    merchant_res = supabase.table("merchants")\
+    merchant_res = db.table("merchants")\
         .select("id, business_name, category, stamps_required, reward_description")\
         .eq("static_qr_token", data.static_qr_token)\
         .execute()
@@ -38,7 +38,7 @@ def join_via_static_qr(data: JoinMerchantRequest, user=Depends(get_current_user)
     merchant = merchant_res.data[0]
     merchant_id = merchant["id"]
 
-    existing = supabase.table("loyalty_cards")\
+    existing = db.table("loyalty_cards")\
         .select("*")\
         .eq("client_id", user["sub"])\
         .eq("merchant_id", merchant_id)\
@@ -55,9 +55,9 @@ def join_via_static_qr(data: JoinMerchantRequest, user=Depends(get_current_user)
 
     try:
         # Vérifier si l'utilisateur existe déjà dans public.users
-        existing_user = supabase.table("users").select("id").eq("id", user["sub"]).execute()
+        existing_user = db.table("users").select("id").eq("id", user["sub"]).execute()
         if not existing_user.data:
-            supabase.table("users").insert({
+            db.table("users").insert({
                 "id": user["sub"],
                 "email": user_email,
                 "user_type": "client",
@@ -74,7 +74,7 @@ def join_via_static_qr(data: JoinMerchantRequest, user=Depends(get_current_user)
     # ── Créer la carte de fidélité ─────────────────────────────────────────────
     try:
         qr_token = str(uuid.uuid4())
-        card = supabase.table("loyalty_cards").insert({
+        card = db.table("loyalty_cards").insert({
             "client_id": user["sub"],
             "merchant_id": merchant_id,
             "stamps_count": 0,
@@ -91,11 +91,11 @@ def join_via_static_qr(data: JoinMerchantRequest, user=Depends(get_current_user)
 @router.post("/")
 def create_card(data: CreateCardRequest, user=Depends(get_current_user)):
     client_id = user["sub"]
-    existing = supabase.table("loyalty_cards").select("id").eq("client_id", client_id).eq("merchant_id", data.merchant_id).execute()
+    existing = db.table("loyalty_cards").select("id").eq("client_id", client_id).eq("merchant_id", data.merchant_id).execute()
     if existing.data:
         raise HTTPException(status_code=400, detail="Carte déjà existante pour ce commerce")
     qr_token = str(uuid.uuid4())
-    card = supabase.table("loyalty_cards").insert({
+    card = db.table("loyalty_cards").insert({
         "client_id": client_id,
         "merchant_id": data.merchant_id,
         "stamps_count": 0,
@@ -106,38 +106,42 @@ def create_card(data: CreateCardRequest, user=Depends(get_current_user)):
 @router.get("/me")
 def get_my_cards(user=Depends(get_current_user), limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)):
     client_id = user["sub"]
-    cards = supabase.table("loyalty_cards").select(
-        "*, merchants(business_name, category, stamps_required, reward_description, program_type, "
-        "points_per_euro, points_required, address, phone, opening_hours, opening_days, website, description)"
-    ).eq("client_id", client_id).range(offset, offset + limit - 1).execute()
+    cards = db.table("loyalty_cards").select("*").eq("client_id", client_id).range(offset, offset + limit - 1).execute()
 
     if not cards.data:
         return []
 
-    # Récupérer les designs de cartes pour tous les commerçants en une seule requête
+    # Fetch merchants + designs en deux requêtes bulk
     merchant_ids = list({c["merchant_id"] for c in cards.data if c.get("merchant_id")})
+    m_map: dict = {}
     designs: dict = {}
     if merchant_ids:
+        m_res = db.table("merchants").select(
+            "id, business_name, category, stamps_required, reward_description, program_type, "
+            "points_per_euro, points_required, address, phone, opening_hours, opening_days, website, description"
+        ).in_("id", merchant_ids).execute()
+        m_map = {m["id"]: m for m in m_res.data}
         try:
-            design_res = supabase.table("merchant_card_designs") \
+            design_res = db.table("merchant_card_designs") \
                 .select("merchant_id, card_design") \
                 .in_("merchant_id", merchant_ids) \
                 .execute()
             designs = {d["merchant_id"]: d["card_design"] for d in (design_res.data or [])}
         except Exception:
-            pass  # Pas bloquant si la table n'existe pas encore
+            pass
 
-    # Embarquer le design dans chaque carte
+    # Embarquer merchant + design dans chaque carte
     for card in cards.data:
         mid = card.get("merchant_id")
-        card["card_design"] = designs.get(mid)  # None si aucun design
+        card["merchants"] = m_map.get(mid)
+        card["card_design"] = designs.get(mid)
 
     # Récupérer le dernier scan par carte (une seule requête bulk)
     card_ids = [c["id"] for c in cards.data]
     last_scan_map: dict = {}
     if card_ids:
         try:
-            scan_res = supabase.table("scan_history") \
+            scan_res = db.table("scan_history") \
                 .select("card_id, scanned_at") \
                 .in_("card_id", card_ids) \
                 .order("scanned_at", desc=True) \
@@ -160,7 +164,7 @@ def get_my_cards(user=Depends(get_current_user), limit: int = Query(50, ge=1, le
 @router.get("/qr/{card_id}")
 def get_dynamic_qr(card_id: str, user=Depends(get_current_user)):
     # Vérifier que la carte appartient bien à ce client
-    card = supabase.table("loyalty_cards").select("*").eq("id", card_id).eq("client_id", user["sub"]).execute()
+    card = db.table("loyalty_cards").select("*").eq("id", card_id).eq("client_id", user["sub"]).execute()
     if not card.data:
         raise HTTPException(status_code=404, detail="Carte non trouvée")
     
@@ -179,7 +183,7 @@ def get_client_history(user=Depends(get_current_user)):
     if user.get("user_type", "client") != "client":
         raise HTTPException(status_code=403, detail="Réservé aux clients")
 
-    res = supabase.table("scan_history")\
+    res = db.table("scan_history")\
         .select("*")\
         .eq("client_id", user["sub"])\
         .order("scanned_at", desc=True)\
@@ -190,7 +194,7 @@ def get_client_history(user=Depends(get_current_user)):
     merchant_ids = list({s["merchant_id"] for s in (res.data or [])})
     merchant_map: dict = {}
     if merchant_ids:
-        m_res = supabase.table("merchants")\
+        m_res = db.table("merchants")\
             .select("id, business_name, category, program_type, points_required")\
             .in_("id", merchant_ids)\
             .execute()
@@ -226,7 +230,7 @@ def get_scan_history(user=Depends(get_current_user)):
     if user["user_type"] != "merchant":
         raise HTTPException(status_code=403, detail="Réservé aux commerçants")
 
-    res = supabase.table("scan_history")\
+    res = db.table("scan_history")\
         .select("*")\
         .eq("merchant_id", user["sub"])\
         .order("scanned_at", desc=True)\
@@ -235,7 +239,7 @@ def get_scan_history(user=Depends(get_current_user)):
 
     results = []
     for scan in res.data:
-        client_res = supabase.table("users")\
+        client_res = db.table("users")\
             .select("name, email")\
             .eq("id", scan["client_id"])\
             .execute()
@@ -250,7 +254,7 @@ def get_merchant_clients(user=Depends(get_current_user), limit: int = Query(50, 
     if user["user_type"] != "merchant":
         raise HTTPException(status_code=403, detail="Réservé aux commerçants")
 
-    cards_res = supabase.table("loyalty_cards")\
+    cards_res = db.table("loyalty_cards")\
         .select("*")\
         .eq("merchant_id", user["sub"])\
         .range(offset, offset + limit - 1)\
@@ -258,7 +262,7 @@ def get_merchant_clients(user=Depends(get_current_user), limit: int = Query(50, 
 
     results = []
     for card in cards_res.data:
-        client_res = supabase.table("users")\
+        client_res = db.table("users")\
             .select("name, email, profile_picture_url")\
             .eq("id", card["client_id"])\
             .execute()
@@ -277,7 +281,7 @@ def poll_stamp(card_id: str, user=Depends(get_current_user)):
     if user["user_type"] != "client":
         raise HTTPException(status_code=403, detail="Réservé aux clients")
 
-    card_res = supabase.table("loyalty_cards")\
+    card_res = db.table("loyalty_cards")\
         .select("id, stamps_count, points_count, merchant_id")\
         .eq("id", card_id)\
         .eq("client_id", user["sub"])\
@@ -286,7 +290,7 @@ def poll_stamp(card_id: str, user=Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="Carte non trouvée")
     card = card_res.data[0]
 
-    scan_res = supabase.table("scan_history")\
+    scan_res = db.table("scan_history")\
         .select("stamps_count, reward_reached, scanned_at")\
         .eq("card_id", card_id)\
         .order("scanned_at", desc=True)\
@@ -318,7 +322,7 @@ def adjust_stamp(card_id: str, data: AdjustStampRequest, user=Depends(get_curren
     if data.delta > 100_000:
         raise HTTPException(status_code=400, detail="delta trop élevé (max 100 000)")
 
-    card_res = supabase.table("loyalty_cards")\
+    card_res = db.table("loyalty_cards")\
         .select("*")\
         .eq("id", card_id)\
         .eq("merchant_id", user["sub"])\
@@ -327,7 +331,7 @@ def adjust_stamp(card_id: str, data: AdjustStampRequest, user=Depends(get_curren
         raise HTTPException(status_code=404, detail="Carte non trouvée")
 
     card = card_res.data[0]
-    merchant_res = supabase.table("merchants").select("stamps_required, points_required, points_per_euro, reward_description, program_type").eq("id", user["sub"]).execute()
+    merchant_res = db.table("merchants").select("stamps_required, points_required, points_per_euro, reward_description, program_type").eq("id", user["sub"]).execute()
     merchant = merchant_res.data[0] if merchant_res.data else {}
     program_type = merchant.get("program_type") or "stamps"
     reward_desc = merchant.get("reward_description") or "Récompense"
@@ -359,13 +363,13 @@ def adjust_stamp(card_id: str, data: AdjustStampRequest, user=Depends(get_curren
             "description": reward_desc,
         } for _ in range(completions)]
         if reward_rows:
-            supabase.table("rewards").insert(reward_rows).execute()
+            db.table("rewards").insert(reward_rows).execute()
     else:
         new_count = min(new_total, required)
 
-    supabase.table("loyalty_cards").update({count_field: new_count}).eq("id", card_id).execute()
+    db.table("loyalty_cards").update({count_field: new_count}).eq("id", card_id).execute()
 
-    supabase.table("scan_history").insert({
+    db.table("scan_history").insert({
         "merchant_id": user["sub"],
         "client_id": card["client_id"],
         "card_id": card_id,
@@ -393,7 +397,7 @@ def set_client_note(card_id: str, data: ClientNoteRequest, user=Depends(get_curr
     if user["user_type"] != "merchant":
         raise HTTPException(status_code=403, detail="Réservé aux commerçants")
 
-    card_res = supabase.table("loyalty_cards")\
+    card_res = db.table("loyalty_cards")\
         .select("id")\
         .eq("id", card_id)\
         .eq("merchant_id", user["sub"])\
@@ -401,7 +405,7 @@ def set_client_note(card_id: str, data: ClientNoteRequest, user=Depends(get_curr
     if not card_res.data:
         raise HTTPException(status_code=404, detail="Carte non trouvée")
 
-    supabase.table("loyalty_cards").update({"merchant_note": data.note.strip()}).eq("id", card_id).execute()
+    db.table("loyalty_cards").update({"merchant_note": data.note.strip()}).eq("id", card_id).execute()
     return {"success": True, "merchant_note": data.note.strip()}
 
 
@@ -410,17 +414,17 @@ def export_clients_csv(user=Depends(get_current_user)):
     if user["user_type"] != "merchant":
         raise HTTPException(status_code=403, detail="Réservé aux commerçants")
 
-    merchant_res = supabase.table("merchants").select("stamps_required").eq("id", user["sub"]).execute()
+    merchant_res = db.table("merchants").select("stamps_required").eq("id", user["sub"]).execute()
     stamps_required = merchant_res.data[0]["stamps_required"] if merchant_res.data else 10
 
-    cards_res = supabase.table("loyalty_cards").select("*").eq("merchant_id", user["sub"]).execute()
+    cards_res = db.table("loyalty_cards").select("*").eq("merchant_id", user["sub"]).execute()
 
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(["Nom", "Email", "Tampons", "Tampons requis", "Tampons restants", "Date inscription"])
 
     for card in cards_res.data:
-        client_res = supabase.table("users").select("name, email").eq("id", card["client_id"]).execute()
+        client_res = db.table("users").select("name, email").eq("id", card["client_id"]).execute()
         client = client_res.data[0] if client_res.data else {}
         stamps = card["stamps_count"]
         created = card.get("created_at", "")[:10] if card.get("created_at") else ""
@@ -449,14 +453,14 @@ def get_daily_stats(user=Depends(get_current_user)):
     since = (datetime.now(timezone.utc) - timedelta(days=29)).isoformat()
 
     # Scans par jour
-    scan_res = supabase.table("scan_history")\
+    scan_res = db.table("scan_history")\
         .select("scanned_at")\
         .eq("merchant_id", user["sub"])\
         .gte("scanned_at", since)\
         .execute()
 
     # Récompenses utilisées (redeemed) par jour — pas les atteintes non utilisées
-    reward_res = supabase.table("rewards")\
+    reward_res = db.table("rewards")\
         .select("redeemed_at")\
         .eq("merchant_id", user["sub"])\
         .gte("redeemed_at", since)\
@@ -491,7 +495,7 @@ def get_merchant_stats(user=Depends(get_current_user)):
     if user["user_type"] != "merchant":
         raise HTTPException(status_code=403, detail="Réservé aux commerçants")
 
-    cards_res = supabase.table("loyalty_cards")\
+    cards_res = db.table("loyalty_cards")\
         .select("*")\
         .eq("merchant_id", user["sub"])\
         .execute()
@@ -500,14 +504,14 @@ def get_merchant_stats(user=Depends(get_current_user)):
     total_clients = len(cards)
     total_stamps = sum(c["stamps_count"] for c in cards)
 
-    rewards_res = supabase.table("scan_history")\
+    rewards_res = db.table("scan_history")\
         .select("id")\
         .eq("merchant_id", user["sub"])\
         .eq("reward_reached", True)\
         .execute()
     total_rewards = len(rewards_res.data)
 
-    scans_res = supabase.table("scan_history")\
+    scans_res = db.table("scan_history")\
         .select("id")\
         .eq("merchant_id", user["sub"])\
         .execute()
@@ -574,17 +578,18 @@ def get_google_wallet_jwt(card_id: str, user=Depends(get_current_user)):
             detail="Google Wallet non configuré — ajoutez GW_ISSUER_ID, GW_SA_EMAIL, GW_PRIVATE_KEY dans Railway"
         )
 
-    card_res = supabase.table("loyalty_cards")\
-        .select("*, merchants(business_name, stamps_required, points_required, reward_description, program_type)")\
-        .eq("id", card_id).eq("client_id", user["sub"]).execute()
+    card_res = db.table("loyalty_cards").select("*").eq("id", card_id).eq("client_id", user["sub"]).execute()
     if not card_res.data:
         raise HTTPException(status_code=404, detail="Carte non trouvée")
 
-    card     = card_res.data[0]
-    merchant = card["merchants"]
+    card = card_res.data[0]
+    m_res = db.table("merchants").select(
+        "id, business_name, stamps_required, points_required, reward_description, program_type"
+    ).eq("id", card["merchant_id"]).execute()
+    merchant = m_res.data[0] if m_res.data else {}
 
     try:
-        design_res = supabase.table("merchant_card_designs")\
+        design_res = db.table("merchant_card_designs")\
             .select("card_design").eq("merchant_id", card["merchant_id"]).execute()
         merchant["card_design"] = design_res.data[0]["card_design"] if design_res.data else None
     except Exception:
@@ -694,7 +699,7 @@ def get_google_wallet_jwt(card_id: str, user=Depends(get_current_user)):
 @router.get("/{card_id}/wallet/apple-url")
 def get_apple_wallet_url(card_id: str, user=Depends(get_current_user)):
     """Génère une URL .pkpass temporaire (5 min) pour iOS Safari."""
-    card_res = supabase.table("loyalty_cards").select("id")\
+    card_res = db.table("loyalty_cards").select("id")\
         .eq("id", card_id).eq("client_id", user["sub"]).execute()
     if not card_res.data:
         raise HTTPException(status_code=404, detail="Carte non trouvée")
@@ -722,17 +727,18 @@ def get_apple_wallet_pass(card_id: str, t: str = Query(...)):
     except Exception:
         raise HTTPException(status_code=401, detail="Token invalide ou expiré")
 
-    card_res = supabase.table("loyalty_cards")\
-        .select("*, merchants(business_name, stamps_required, points_required, reward_description, program_type)")\
-        .eq("id", card_id).eq("client_id", client_id).execute()
+    card_res = db.table("loyalty_cards").select("*").eq("id", card_id).eq("client_id", client_id).execute()
     if not card_res.data:
         raise HTTPException(status_code=404, detail="Carte non trouvée")
 
-    card     = card_res.data[0]
-    merchant = card["merchants"]
+    card = card_res.data[0]
+    m_res2 = db.table("merchants").select(
+        "id, business_name, stamps_required, points_required, reward_description, program_type"
+    ).eq("id", card["merchant_id"]).execute()
+    merchant = m_res2.data[0] if m_res2.data else {}
 
     try:
-        design_res = supabase.table("merchant_card_designs")\
+        design_res = db.table("merchant_card_designs")\
             .select("card_design").eq("merchant_id", card["merchant_id"]).execute()
         merchant["card_design"] = design_res.data[0]["card_design"] if design_res.data else None
     except Exception:
@@ -833,7 +839,7 @@ def delete_card(card_id: str, user=Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="Réservé aux clients")
 
     # Vérifier que la carte appartient bien à ce client
-    card_res = supabase.table("loyalty_cards")\
+    card_res = db.table("loyalty_cards")\
         .select("id, merchant_id")\
         .eq("id", card_id)\
         .eq("client_id", user["sub"])\
@@ -845,10 +851,10 @@ def delete_card(card_id: str, user=Depends(get_current_user)):
     merchant_id = card_res.data[0]["merchant_id"]
 
     # Supprimer l'historique de scan lié
-    supabase.table("scan_history").delete().eq("card_id", card_id).execute()
+    db.table("scan_history").delete().eq("card_id", card_id).execute()
 
     # Supprimer les récompenses non utilisées liées à cette carte (client + commerçant)
-    supabase.table("rewards")\
+    db.table("rewards")\
         .delete()\
         .eq("client_id", user["sub"])\
         .eq("merchant_id", merchant_id)\
@@ -856,6 +862,6 @@ def delete_card(card_id: str, user=Depends(get_current_user)):
         .execute()
 
     # Supprimer la carte
-    supabase.table("loyalty_cards").delete().eq("id", card_id).execute()
+    db.table("loyalty_cards").delete().eq("id", card_id).execute()
 
     return {"message": "Carte supprimée"}

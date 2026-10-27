@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 from app.dependencies import get_current_user
-from app.database import supabase
+from app.database import supabase, db
 import os
 import json
 import firebase_admin
@@ -33,7 +33,7 @@ def _send_fcm_to_clients(
     if not client_ids:
         return 0
     try:
-        users_res = supabase.table("users")\
+        users_res = db.table("users")\
             .select("id, fcm_token, notif_push, notif_offres, notif_visites")\
             .in_("id", client_ids)\
             .execute()
@@ -84,7 +84,7 @@ def _send_fcm_to_clients(
             for client_id in client_ids if client_id in allowed_ids
         ]
         if records:
-            supabase.table("client_notifications").insert(records).execute()
+            db.table("client_notifications").insert(records).execute()
     except Exception as e:
         print(f"❌ Erreur insertion client_notifications (batch): {e}")
 
@@ -102,7 +102,7 @@ class NotifPrefsPayload(BaseModel):
 async def update_notif_preferences(data: NotifPrefsPayload, user=Depends(get_current_user)):
     if user["user_type"] != "client":
         raise HTTPException(status_code=403, detail="Réservé aux clients")
-    supabase.table("users").update({
+    db.table("users").update({
         "notif_push":    data.notif_push,
         "notif_offres":  data.notif_offres,
         "notif_visites": data.notif_visites,
@@ -121,10 +121,10 @@ async def send_notification(data: NotificationPayload, user=Depends(get_current_
     if user["user_type"] != "merchant":
         raise HTTPException(status_code=403, detail="Réservé aux commerçants")
 
-    merchant_res = supabase.table("merchants").select("business_name").eq("id", user["sub"]).execute()
+    merchant_res = db.table("merchants").select("business_name").eq("id", user["sub"]).execute()
     merchant_name = merchant_res.data[0]["business_name"] if merchant_res.data else ""
 
-    cards = supabase.table("loyalty_cards")\
+    cards = db.table("loyalty_cards")\
         .select("client_id")\
         .eq("merchant_id", user["sub"])\
         .execute()
@@ -150,11 +150,11 @@ async def send_targeted_notification(data: TargetedNotificationPayload, user=Dep
     if user["user_type"] != "merchant":
         raise HTTPException(status_code=403, detail="Réservé aux commerçants")
 
-    merchant_res = supabase.table("merchants").select("business_name, stamps_required").eq("id", user["sub"]).execute()
+    merchant_res = db.table("merchants").select("business_name, stamps_required").eq("id", user["sub"]).execute()
     merchant_name = merchant_res.data[0]["business_name"] if merchant_res.data else ""
     stamps_required = merchant_res.data[0]["stamps_required"] if merchant_res.data else 10
 
-    cards_res = supabase.table("loyalty_cards").select("*").eq("merchant_id", user["sub"]).execute()
+    cards_res = db.table("loyalty_cards").select("*").eq("merchant_id", user["sub"]).execute()
     if not cards_res.data:
         return {"sent": 0, "message": "Aucun client"}
 
@@ -166,7 +166,7 @@ async def send_targeted_notification(data: TargetedNotificationPayload, user=Dep
                 continue
         if data.inactive_days is not None:
             since = (datetime.now(timezone.utc) - timedelta(days=data.inactive_days)).isoformat()
-            last_scan = supabase.table("scan_history")\
+            last_scan = db.table("scan_history")\
                 .select("scanned_at")\
                 .eq("merchant_id", user["sub"])\
                 .eq("client_id", card["client_id"])\
@@ -210,7 +210,7 @@ async def schedule_notification(data: SchedulePayload, user=Depends(get_current_
     if scheduled_dt <= datetime.now(timezone.utc):
         raise HTTPException(status_code=400, detail="La date doit être dans le futur")
 
-    res = supabase.table("scheduled_notifications").insert({
+    res = db.table("scheduled_notifications").insert({
         "merchant_id": user["sub"],
         "title": data.title,
         "message": data.message,
@@ -228,7 +228,7 @@ async def get_scheduled(user=Depends(get_current_user)):
     if user["user_type"] != "merchant":
         raise HTTPException(status_code=403, detail="Réservé aux commerçants")
 
-    res = supabase.table("scheduled_notifications")\
+    res = db.table("scheduled_notifications")\
         .select("*")\
         .eq("merchant_id", user["sub"])\
         .eq("sent", False)\
@@ -243,7 +243,7 @@ async def cancel_scheduled(notif_id: str, user=Depends(get_current_user)):
     if user["user_type"] != "merchant":
         raise HTTPException(status_code=403, detail="Réservé aux commerçants")
 
-    res = supabase.table("scheduled_notifications")\
+    res = db.table("scheduled_notifications")\
         .select("id")\
         .eq("id", notif_id)\
         .eq("merchant_id", user["sub"])\
@@ -252,7 +252,7 @@ async def cancel_scheduled(notif_id: str, user=Depends(get_current_user)):
     if not res.data:
         raise HTTPException(status_code=404, detail="Notification introuvable")
 
-    supabase.table("scheduled_notifications")\
+    db.table("scheduled_notifications")\
         .delete()\
         .eq("id", notif_id)\
         .execute()
@@ -267,7 +267,7 @@ async def get_client_notifications(user=Depends(get_current_user)):
     """Retourne les notifications du client connecté, les plus récentes en premier."""
     if user["user_type"] != "client":
         raise HTTPException(status_code=403, detail="Réservé aux clients")
-    res = supabase.table("client_notifications")\
+    res = db.table("client_notifications")\
         .select("*")\
         .eq("client_id", user["sub"])\
         .order("created_at", desc=True)\
@@ -281,7 +281,7 @@ async def mark_all_client_notifications_read(user=Depends(get_current_user)):
     """Marque toutes les notifications non lues du client connecté comme lues."""
     if user["user_type"] != "client":
         raise HTTPException(status_code=403, detail="Réservé aux clients")
-    supabase.table("client_notifications")\
+    db.table("client_notifications")\
         .update({"read": True})\
         .eq("client_id", user["sub"])\
         .eq("read", False)\
@@ -295,7 +295,7 @@ def send_due_notifications():
     """Vérifie et envoie les notifications planifiées dont l'heure est passée."""
     now = datetime.now(timezone.utc).isoformat()
     try:
-        res = supabase.table("scheduled_notifications")\
+        res = db.table("scheduled_notifications")\
             .select("*")\
             .eq("sent", False)\
             .lte("scheduled_at", now)\
@@ -309,11 +309,11 @@ def send_due_notifications():
             filter_value = notif.get("filter_value")
 
             # Récupérer le nom du commerçant
-            merchant_res = supabase.table("merchants").select("business_name, stamps_required").eq("id", merchant_id).execute()
+            merchant_res = db.table("merchants").select("business_name, stamps_required").eq("id", merchant_id).execute()
             merchant_name = merchant_res.data[0]["business_name"] if merchant_res.data else ""
 
             # Récupérer les clients cibles
-            cards_res = supabase.table("loyalty_cards")\
+            cards_res = db.table("loyalty_cards")\
                 .select("client_id, stamps_count")\
                 .eq("merchant_id", merchant_id)\
                 .execute()
@@ -329,7 +329,7 @@ def send_due_notifications():
             elif filter_type == "inactive" and filter_value is not None:
                 since = (datetime.now(timezone.utc) - timedelta(days=filter_value)).isoformat()
                 for card in cards_res.data:
-                    last_scan = supabase.table("scan_history")\
+                    last_scan = db.table("scan_history")\
                         .select("scanned_at")\
                         .eq("merchant_id", merchant_id)\
                         .eq("client_id", card["client_id"])\
@@ -344,7 +344,7 @@ def send_due_notifications():
             print(f"✅ Scheduled notif {notif['id']}: {sent} envoyée(s)")
 
             # Marquer comme envoyée
-            supabase.table("scheduled_notifications")\
+            db.table("scheduled_notifications")\
                 .update({"sent": True})\
                 .eq("id", notif["id"])\
                 .execute()
