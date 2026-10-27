@@ -160,6 +160,32 @@ def generate_merchant_code(request: Request, data: MerchantCodeRequest):
 
     return {"code": code, "email": data.email}
 
+class AdminMerchantRequest(BaseModel):
+    email: str
+    password: str
+    name: str
+    admin_key: str
+
+@router.post("/admin/create-merchant")
+def admin_create_merchant(data: AdminMerchantRequest):
+    """Crée un compte commerçant directement — réservé admin (admin_key = SECRET_KEY)."""
+    if data.admin_key != SECRET_KEY:
+        raise HTTPException(status_code=403, detail="Clé admin invalide")
+    existing = db.table("users").select("id").eq("email", data.email).execute()
+    if existing.data:
+        raise HTTPException(status_code=400, detail="Email déjà utilisé")
+    password_hash = bcrypt.hashpw(data.password.encode(), bcrypt.gensalt()).decode()
+    user = db.table("users").insert({
+        "email": data.email,
+        "password_hash": password_hash,
+        "user_type": "merchant",
+        "name": data.name,
+    }).execute()
+    user_id = user.data[0]["id"]
+    token = create_token(user_id, "merchant")
+    logger.info(f"ADMIN CREATE MERCHANT email={data.email}")
+    return {"token": token, "user_type": "merchant", "name": data.name}
+
 @router.post("/validate-merchant-code")
 def validate_merchant_code(data: ValidateCodeRequest):
     res = db.table("merchant_codes")\
