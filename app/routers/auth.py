@@ -133,11 +133,7 @@ def google_login(request: Request, data: GoogleAuthRequest):
             }).execute()
             user = new_user.data[0]
 
-        token = jwt.encode(
-            {"sub": user["id"], "user_type": user["user_type"]},
-            SECRET_KEY,
-            algorithm="HS256"
-        )
+        token = create_token(user["id"], user["user_type"])
 
         return {
             "token": token,
