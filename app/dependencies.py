@@ -23,20 +23,19 @@ def _resolve_user_type(meta: dict) -> str:
 
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     """
-    Vérifie le token Bearer Supabase et retourne un payload normalisé :
+    Vérifie le token Bearer et retourne un payload normalisé :
       { "sub": "<uuid>", "user_type": "<client|merchant>", "email": "<email>" }
 
     Stratégie (ordre de priorité) :
-      1. Décodage local JWT avec SUPABASE_JWT_SECRET (HS256) — rapide, pas de réseau
-      2. Supabase Auth API — fallback si le secret n'est pas dispo
+      1. Décodage local avec SUPABASE_JWT_SECRET (HS256) — tokens Supabase
+      2. Décodage local avec SECRET_KEY (HS256) — tokens backend (email/Google mobile)
+      3. Supabase Auth API — fallback réseau
     """
-    from app.database import supabase, SUPABASE_JWT_SECRET
+    from app.database import supabase, SUPABASE_JWT_SECRET, SECRET_KEY
 
     token = credentials.credentials
 
-    # ── 1. Décodage local (SUPABASE_JWT_SECRET, HS256) ─────────────────────────
-    #   Les JWTs Supabase contiennent user_metadata directement dans le payload.
-    #   Beaucoup plus rapide que l'appel réseau à get_user().
+    # ── 1. Token Supabase (SUPABASE_JWT_SECRET) ─────────────────────────────────
     jwt_secret = SUPABASE_JWT_SECRET or os.getenv("SUPABASE_JWT_SECRET")
     if jwt_secret:
         try:
@@ -44,7 +43,7 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
                 token,
                 jwt_secret,
                 algorithms=["HS256"],
-                options={"verify_aud": False},  # audience = "authenticated" côté Supabase
+                options={"verify_aud": False},
             )
             user_metadata = payload.get("user_metadata") or {}
             user_type = _resolve_user_type(user_metadata)
@@ -56,11 +55,26 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
                     "email":     payload.get("email") or "",
                 }
         except JWTError:
-            pass  # secret incorrect ou token expiré → essai suivant
+            pass
 
-    # ── 2. Supabase Auth API (fallback réseau) ──────────────────────────────────
+    # ── 2. Token backend (SECRET_KEY) — email/password ou Google mobile ─────────
+    secret_key = SECRET_KEY or os.getenv("SECRET_KEY")
+    if secret_key:
+        try:
+            payload = jwt.decode(token, secret_key, algorithms=["HS256"])
+            sub = payload.get("sub")
+            if sub:
+                return {
+                    "sub":       sub,
+                    "user_type": payload.get("user_type", "client"),
+                    "email":     payload.get("email", ""),
+                }
+        except JWTError:
+            pass
+
+    # ── 3. Supabase Auth API (fallback réseau) ──────────────────────────────────
     try:
-        response = supabase.auth.get_user(token)   # argument positionnel (toutes versions)
+        response = supabase.auth.get_user(token)
         if response and response.user:
             user = response.user
             user_metadata = user.user_metadata or {}
