@@ -4,6 +4,18 @@ from app.dependencies import get_current_user
 from app.database import supabase, db
 import bcrypt
 import time
+import os
+import boto3
+
+_r2 = boto3.client(
+    "s3",
+    endpoint_url=os.getenv("R2_ENDPOINT"),
+    aws_access_key_id=os.getenv("R2_ACCESS_KEY_ID"),
+    aws_secret_access_key=os.getenv("R2_SECRET_ACCESS_KEY"),
+    region_name="auto",
+)
+_R2_BUCKET     = os.getenv("R2_BUCKET", "qarta-storage")
+_R2_PUBLIC_URL = os.getenv("R2_PUBLIC_URL", "")
 
 router = APIRouter(tags=["Users"])
 
@@ -76,34 +88,25 @@ async def upload_profile_picture(
     file: UploadFile = File(...),
     current_user=Depends(get_current_user)
 ):
-    """Upload a profile picture — stores in Supabase Storage bucket 'avatars'."""
+    """Upload a profile picture — stores in Cloudflare R2 bucket 'qarta-storage'."""
     user_id = current_user["sub"]
     contents = await file.read()
     content_type = file.content_type or "image/jpeg"
     ext = "png" if content_type == "image/png" else "jpg"
-    filename = f"{user_id}.{ext}"
+    key = f"avatars/{user_id}.{ext}"
 
-    # Supprimer l'ancien fichier s'il existe (ignore erreur si absent)
     try:
-        supabase.storage.from_("avatars").remove([filename])
-    except Exception:
-        pass
-
-    # Upload du nouveau fichier
-    try:
-        supabase.storage.from_("avatars").upload(
-            path=filename,
-            file=contents,
-            file_options={"content-type": content_type, "cache-control": "3600", "upsert": "true"}
+        _r2.put_object(
+            Bucket=_R2_BUCKET,
+            Key=key,
+            Body=contents,
+            ContentType=content_type,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erreur storage upload: {str(e)}")
 
-    # URL publique avec cache-buster
-    raw_url = supabase.storage.from_("avatars").get_public_url(filename)
-    public_url = f"{raw_url}?v={int(time.time())}"
+    public_url = f"{_R2_PUBLIC_URL}/{key}?v={int(time.time())}"
 
-    # Mise à jour en base
     db_res = db.table("users").update(
         {"profile_picture_url": public_url}
     ).eq("id", user_id).execute()
