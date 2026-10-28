@@ -5,6 +5,7 @@ from app.limiter import limiter
 from app.logger import get_logger
 import bcrypt
 import uuid
+import httpx
 from jose import jwt
 from datetime import datetime, timedelta
 from google.oauth2 import id_token
@@ -13,7 +14,9 @@ import secrets
 import string
 import os
 
-GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_ID  = os.getenv("GOOGLE_CLIENT_ID")
+SUPABASE_URL      = os.getenv("SUPABASE_URL", "")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", os.getenv("SUPABASE_SERVICE_KEY", ""))
 logger = get_logger("auth")
 
 router = APIRouter()
@@ -104,11 +107,18 @@ def login(request: Request, data: LoginRequest):
     user_data = next((u for u in user_list if u["password_hash"] == "SUPABASE_AUTH"), user_list[0])
 
     if user_data["password_hash"] == "SUPABASE_AUTH":
-        # Compte créé via le site web — mot de passe géré par Supabase Auth
+        # Compte créé via le site web — vérifier le mot de passe via l'API REST Supabase Auth
         try:
-            auth_resp = supabase.auth.sign_in_with_password({"email": data.email, "password": data.password})
-            if not auth_resp.user:
+            resp = httpx.post(
+                f"{SUPABASE_URL}/auth/v1/token?grant_type=password",
+                headers={"apikey": SUPABASE_ANON_KEY, "Content-Type": "application/json"},
+                json={"email": data.email, "password": data.password},
+                timeout=10,
+            )
+            if resp.status_code != 200:
                 raise HTTPException(status_code=401, detail="Email ou mot de passe incorrect")
+        except HTTPException:
+            raise
         except Exception:
             raise HTTPException(status_code=401, detail="Email ou mot de passe incorrect")
     elif not bcrypt.checkpw(data.password.encode(), user_data["password_hash"].encode()):
