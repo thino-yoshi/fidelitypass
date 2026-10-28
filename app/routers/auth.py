@@ -160,6 +160,24 @@ def generate_merchant_code(request: Request, data: MerchantCodeRequest):
 
     return {"code": code, "email": data.email}
 
+class AdminResetPasswordRequest(BaseModel):
+    email: str
+    new_password: str
+    admin_key: str
+
+@router.post("/admin/reset-password")
+def admin_reset_password(data: AdminResetPasswordRequest):
+    """Reset le mot de passe d'un utilisateur — réservé admin."""
+    if data.admin_key != SECRET_KEY:
+        raise HTTPException(status_code=403, detail="Clé admin invalide")
+    user = db.table("users").select("id").eq("email", data.email).execute()
+    if not user.data:
+        raise HTTPException(status_code=404, detail="Utilisateur non trouvé")
+    new_hash = bcrypt.hashpw(data.new_password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+    db.table("users").update({"password_hash": new_hash}).eq("email", data.email).execute()
+    logger.info(f"ADMIN RESET PASSWORD email={data.email}")
+    return {"success": True}
+
 class AdminMerchantRequest(BaseModel):
     email: str
     password: str
