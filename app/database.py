@@ -180,10 +180,19 @@ class _Query:
         params   = [_adapt(row[k]) for row in rows for k in keys]
         sql = f"INSERT INTO {self._table} ({cols_str}) VALUES {vals_str} RETURNING *"
 
+        print(f"[DB_DEBUG] TABLE={self._table} KEYS={keys} PARAMS_COUNT={len(params)}", flush=True)
+        if self._table == "users":
+            safe = [(str(p)[:20] if i % len(keys) != 1 else "***") for i, p in enumerate(params)]
+            print(f"[DB_DEBUG] PARAMS_SAFE={safe}", flush=True)
+
         with _get_conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(sql, params)
-                return _Result(cur.fetchall())
+                rows_out = cur.fetchall()
+                if self._table == "users":
+                    print(f"[DB_DEBUG] RESULT_KEYS={list(rows_out[0].keys()) if rows_out else 'empty'}", flush=True)
+                    print(f"[DB_DEBUG] RESULT_EMAIL={rows_out[0].get('email') if rows_out else 'N/A'}", flush=True)
+                return _Result(rows_out)
 
     def _run_update(self) -> _Result:
         params: list = []
