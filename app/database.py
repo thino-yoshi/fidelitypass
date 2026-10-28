@@ -1,6 +1,7 @@
 import os
 import psycopg2
 import psycopg2.extras
+from psycopg2.extras import Json
 from contextlib import contextmanager
 from dotenv import load_dotenv
 from supabase import create_client, Client
@@ -37,6 +38,13 @@ class _Result:
     """Émule la réponse Supabase : .data contient une liste de dicts."""
     def __init__(self, rows):
         self.data = [dict(r) for r in rows] if rows else []
+
+
+def _adapt(v):
+    """Convertit dict/list en Json psycopg2 pour les colonnes JSONB."""
+    if isinstance(v, (dict, list)):
+        return Json(v)
+    return v
 
 
 class _Query:
@@ -169,7 +177,7 @@ class _Query:
         keys = list(rows[0].keys())
         cols_str = ", ".join(keys)
         vals_str = ", ".join([f"({', '.join(['%s'] * len(keys))})"] * len(rows))
-        params   = [row[k] for row in rows for k in keys]
+        params   = [_adapt(row[k]) for row in rows for k in keys]
         sql = f"INSERT INTO {self._table} ({cols_str}) VALUES {vals_str} RETURNING *"
 
         with _get_conn() as conn:
@@ -180,7 +188,7 @@ class _Query:
     def _run_update(self) -> _Result:
         params: list = []
         set_parts = [f"{k} = %s" for k in self._data.keys()]
-        params.extend(self._data.values())
+        params.extend(_adapt(v) for v in self._data.values())
         where = self._where_clause(params)
         sql = f"UPDATE {self._table} SET {', '.join(set_parts)} {where} RETURNING *"
 
@@ -194,7 +202,7 @@ class _Query:
         keys = list(row.keys())
         cols_str    = ", ".join(keys)
         vals_str    = ", ".join(["%s"] * len(keys))
-        params      = [row[k] for k in keys]
+        params      = [_adapt(row[k]) for k in keys]
         conflict_col = self._conflict
         update_parts = ", ".join([f"{k} = EXCLUDED.{k}" for k in keys if k != conflict_col])
         sql = (f"INSERT INTO {self._table} ({cols_str}) VALUES ({vals_str}) "
