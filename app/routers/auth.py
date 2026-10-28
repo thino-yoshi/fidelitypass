@@ -94,14 +94,24 @@ def register(request: Request, data: RegisterRequest):
 @router.post("/login")
 @limiter.limit("10/minute")
 def login(request: Request, data: LoginRequest):
-    user = db.table("users").select("*").eq("email", data.email).execute()
+    result = db.table("users").select("*").eq("email", data.email).execute()
 
-    if not user.data:
+    if not result.data:
         raise HTTPException(status_code=401, detail="Email ou mot de passe incorrect")
 
-    user_data = user.data[0]
+    # S'il y a un doublon (compte site web + compte app), préférer le compte site (SUPABASE_AUTH)
+    user_list = result.data
+    user_data = next((u for u in user_list if u["password_hash"] == "SUPABASE_AUTH"), user_list[0])
 
-    if not bcrypt.checkpw(data.password.encode(), user_data["password_hash"].encode()):
+    if user_data["password_hash"] == "SUPABASE_AUTH":
+        # Compte créé via le site web — mot de passe géré par Supabase Auth
+        try:
+            auth_resp = supabase.auth.sign_in_with_password({"email": data.email, "password": data.password})
+            if not auth_resp.user:
+                raise HTTPException(status_code=401, detail="Email ou mot de passe incorrect")
+        except Exception:
+            raise HTTPException(status_code=401, detail="Email ou mot de passe incorrect")
+    elif not bcrypt.checkpw(data.password.encode(), user_data["password_hash"].encode()):
         raise HTTPException(status_code=401, detail="Email ou mot de passe incorrect")
 
     token = create_token(user_data["id"], user_data["user_type"])
