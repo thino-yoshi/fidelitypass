@@ -102,26 +102,18 @@ def login(request: Request, data: LoginRequest):
     if not result.data:
         raise HTTPException(status_code=401, detail="Email ou mot de passe incorrect")
 
-    # S'il y a un doublon (compte site web + compte app), préférer le compte site (SUPABASE_AUTH)
+    # S'il y a un doublon (compte site web SUPABASE_AUTH + compte app bcrypt),
+    # préférer le compte app (bcrypt) — l'app gère ses propres comptes via Neon
     user_list = result.data
-    user_data = next((u for u in user_list if u["password_hash"] == "SUPABASE_AUTH"), user_list[0])
+    user_data = next(
+        (u for u in user_list if u["password_hash"] not in ("SUPABASE_AUTH", "google_oauth")),
+        user_list[0]
+    )
 
-    if user_data["password_hash"] == "SUPABASE_AUTH":
-        # Compte créé via le site web — vérifier le mot de passe via l'API REST Supabase Auth
-        try:
-            resp = httpx.post(
-                f"{SUPABASE_URL}/auth/v1/token?grant_type=password",
-                headers={"apikey": SUPABASE_ANON_KEY, "Content-Type": "application/json"},
-                json={"email": data.email, "password": data.password},
-                timeout=10,
-            )
-            if resp.status_code != 200:
-                raise HTTPException(status_code=401, detail="Email ou mot de passe incorrect")
-        except HTTPException:
-            raise
-        except Exception:
-            raise HTTPException(status_code=401, detail="Email ou mot de passe incorrect")
-    elif not bcrypt.checkpw(data.password.encode(), user_data["password_hash"].encode()):
+    if user_data["password_hash"] in ("SUPABASE_AUTH", "google_oauth"):
+        raise HTTPException(status_code=401, detail="Ce compte utilise une connexion Google ou Apple")
+
+    if not bcrypt.checkpw(data.password.encode(), user_data["password_hash"].encode()):
         raise HTTPException(status_code=401, detail="Email ou mot de passe incorrect")
 
     token = create_token(user_data["id"], user_data["user_type"])
