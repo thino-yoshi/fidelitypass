@@ -13,6 +13,12 @@ import time
 import hashlib
 import zipfile
 import base64
+
+def _ts(v) -> str:
+    """Neon retourne les TIMESTAMP comme datetime Python (pas string). Normalise pour le tri."""
+    if v is None:
+        return ""
+    return v.isoformat() if hasattr(v, "isoformat") else str(v)
 from datetime import datetime, timedelta, timezone
 
 router = APIRouter(tags=["Cards"])
@@ -157,7 +163,7 @@ def get_my_cards(user=Depends(get_current_user), limit: int = Query(50, ge=1, le
         card["last_scan_at"] = last_scan_map.get(card["id"])  # None si jamais scannée
 
     # Trier : dernière utilisée en premier, jamais scannées à la fin
-    cards.data.sort(key=lambda c: c.get("last_scan_at") or "", reverse=True)
+    cards.data.sort(key=lambda c: _ts(c.get("last_scan_at")), reverse=True)
 
     return cards.data
 
@@ -202,7 +208,7 @@ def get_client_history(user=Depends(get_current_user)):
             merchant_map[m["id"]] = m
 
     # Calcul du delta par carte (ordre croissant → différence consécutive)
-    scans_asc = sorted(res.data or [], key=lambda x: x.get("scanned_at") or "")
+    scans_asc = sorted(res.data or [], key=lambda x: _ts(x.get("scanned_at")))
     prev_by_card: dict = {}
     for scan in scans_asc:
         merchant = merchant_map.get(scan["merchant_id"], {})
@@ -222,7 +228,7 @@ def get_client_history(user=Depends(get_current_user)):
             scan["delta"] = 1
 
     # Retour dans l'ordre décroissant (plus récent en premier)
-    return sorted(res.data or [], key=lambda x: x.get("scanned_at") or "", reverse=True)
+    return sorted(res.data or [], key=lambda x: _ts(x.get("scanned_at")), reverse=True)
 
 
 @router.get("/scan-history")
