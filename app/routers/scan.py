@@ -6,6 +6,7 @@ from app.dependencies import get_current_user
 from app.limiter import limiter
 from app.logger import get_logger
 from jose import jwt, JWTError
+from app.routers.notifications import _send_fcm_to_clients
 
 logger = get_logger("scan")
 
@@ -151,17 +152,9 @@ def scan_qr(request: Request, data: ScanRequest, user=Depends(get_current_user))
             notif_type = "points"
 
         try:
-            db.table("client_notifications").insert({
-                "client_id": card["client_id"],
-                "merchant_id": user["sub"],
-                "merchant_name": merchant["business_name"],
-                "title": notif_title,
-                "body": notif_body,
-                "type": notif_type,
-                "read": False,
-            }).execute()
+            _send_fcm_to_clients(notif_title, notif_body, [card["client_id"]], user["sub"], merchant["business_name"], notif_type, notif_category="general")
         except Exception as e:
-            print(f"❌ Erreur insertion client_notifications: {e}")
+            print(f"❌ Erreur push/notif (points): {e}")
 
         if reward_reached:
             logger.info(f"REWARD(pts) merchant={user['sub']} client={card['client_id']} added={points_added}")
@@ -204,17 +197,9 @@ def scan_qr(request: Request, data: ScanRequest, user=Depends(get_current_user))
         notif_body = f"{new_count}/{merchant['stamps_required']} tampons. Plus que {remaining} pour ta récompense !"
 
     try:
-        db.table("client_notifications").insert({
-            "client_id": card["client_id"],
-            "merchant_id": user["sub"],
-            "merchant_name": merchant["business_name"],
-            "title": notif_title,
-            "body": notif_body,
-            "type": notif_type,
-            "read": False,
-        }).execute()
+        _send_fcm_to_clients(notif_title, notif_body, [card["client_id"]], user["sub"], merchant["business_name"], notif_type, notif_category="general")
     except Exception as e:
-        print(f"❌ Erreur insertion client_notifications: {e}")
+        print(f"❌ Erreur push/notif (stamps): {e}")
 
     if reward_reached:
         logger.info(f"REWARD merchant={user['sub']} client={card['client_id']} card={card['id']}")
