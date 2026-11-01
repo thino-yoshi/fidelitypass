@@ -120,6 +120,19 @@ async def upload_profile_picture(
     return {"profile_picture_url": public_url}
 
 
+@router.delete("/profile-picture")
+async def delete_profile_picture(current_user=Depends(get_current_user)):
+    """Supprime la photo de profil (R2 + colonne DB)."""
+    user_id = current_user["sub"]
+    for ext in ("jpg", "png"):
+        try:
+            _r2.delete_object(Bucket=_R2_BUCKET, Key=f"avatars/{user_id}.{ext}")
+        except Exception:
+            pass
+    db.table("users").update({"profile_picture_url": None}).eq("id", user_id).execute()
+    return {"ok": True}
+
+
 @router.get("/me")
 async def get_me(current_user=Depends(get_current_user)):
     """Get the current user's profile, including profile_picture_url and is_google."""
