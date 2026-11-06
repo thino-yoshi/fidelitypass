@@ -13,6 +13,7 @@ import time
 import hashlib
 import zipfile
 import base64
+from concurrent.futures import ThreadPoolExecutor
 
 def _ts(v) -> str:
     """Neon retourne les TIMESTAMP comme datetime Python (pas string). Normalise pour le tri."""
@@ -117,50 +118,63 @@ def get_my_cards(user=Depends(get_current_user), limit: int = Query(50, ge=1, le
     if not cards.data:
         return []
 
-    # Fetch merchants + designs en deux requêtes bulk
+    # Fetch merchants, designs et derniers scans EN PARALLÈLE (3 requêtes simultanées)
     merchant_ids = list({c["merchant_id"] for c in cards.data if c.get("merchant_id")})
-    m_map: dict = {}
-    designs: dict = {}
-    if merchant_ids:
-        m_res = db.table("merchants").select(
+    card_ids = [c["id"] for c in cards.data]
+
+    def _fetch_merchants():
+        if not merchant_ids:
+            return {}
+        res = db.table("merchants").select(
             "id, business_name, category, stamps_required, reward_description, program_type, "
             "points_per_euro, points_required, address, phone, opening_hours, opening_days, website, description"
         ).in_("id", merchant_ids).execute()
-        m_map = {m["id"]: m for m in m_res.data}
+        return {m["id"]: m for m in res.data}
+
+    def _fetch_designs():
+        if not merchant_ids:
+            return {}
         try:
-            design_res = db.table("merchant_card_designs") \
+            res = db.table("merchant_card_designs") \
                 .select("merchant_id, card_design") \
                 .in_("merchant_id", merchant_ids) \
                 .execute()
-            designs = {d["merchant_id"]: d["card_design"] for d in (design_res.data or [])}
+            return {d["merchant_id"]: d["card_design"] for d in (res.data or [])}
         except Exception:
-            pass
+            return {}
 
-    # Embarquer merchant + design dans chaque carte
-    for card in cards.data:
-        mid = card.get("merchant_id")
-        card["merchants"] = m_map.get(mid)
-        card["card_design"] = designs.get(mid)
-
-    # Récupérer le dernier scan par carte (une seule requête bulk)
-    card_ids = [c["id"] for c in cards.data]
-    last_scan_map: dict = {}
-    if card_ids:
+    def _fetch_last_scans():
+        if not card_ids:
+            return {}
         try:
-            scan_res = db.table("scan_history") \
+            res = db.table("scan_history") \
                 .select("card_id, scanned_at") \
                 .in_("card_id", card_ids) \
                 .order("scanned_at", desc=True) \
                 .execute()
-            for s in (scan_res.data or []):
+            last: dict = {}
+            for s in (res.data or []):
                 cid = s["card_id"]
-                if cid not in last_scan_map:
-                    last_scan_map[cid] = s["scanned_at"]
+                if cid not in last:
+                    last[cid] = s["scanned_at"]
+            return last
         except Exception:
-            pass
+            return {}
 
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        f_m = pool.submit(_fetch_merchants)
+        f_d = pool.submit(_fetch_designs)
+        f_s = pool.submit(_fetch_last_scans)
+        m_map      = f_m.result()
+        designs    = f_d.result()
+        last_scan_map = f_s.result()
+
+    # Embarquer merchant + design + dernier scan dans chaque carte
     for card in cards.data:
-        card["last_scan_at"] = last_scan_map.get(card["id"])  # None si jamais scannée
+        mid = card.get("merchant_id")
+        card["merchants"]   = m_map.get(mid)
+        card["card_design"] = designs.get(mid)
+        card["last_scan_at"] = last_scan_map.get(card["id"])
 
     # Trier : dernière utilisée en premier, jamais scannées à la fin
     cards.data.sort(key=lambda c: _ts(c.get("last_scan_at")), reverse=True)
