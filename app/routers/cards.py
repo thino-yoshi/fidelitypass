@@ -181,6 +181,54 @@ def get_my_cards(user=Depends(get_current_user), limit: int = Query(50, ge=1, le
 
     return cards.data
 
+@router.get("/{card_id}/detail")
+def get_card_detail(card_id: str, user=Depends(get_current_user)):
+    """Retourne une seule carte complète (merchant + design + dernier scan).
+    Utilisé après un scan ou un ajout de carte pour éviter de tout recharger."""
+    client_id = user["sub"]
+    card_res = db.table("loyalty_cards").select("*") \
+        .eq("id", card_id).eq("client_id", client_id).execute()
+    if not card_res.data:
+        raise HTTPException(status_code=404, detail="Carte non trouvée")
+    card = card_res.data[0]
+    mid = card.get("merchant_id")
+
+    def _fetch_merchant():
+        if not mid: return None
+        res = db.table("merchants").select(
+            "id, business_name, category, stamps_required, reward_description, program_type, "
+            "points_per_euro, points_required, address, phone, opening_hours, opening_days, website, description"
+        ).eq("id", mid).execute()
+        return res.data[0] if res.data else None
+
+    def _fetch_design():
+        if not mid: return None
+        try:
+            res = db.table("merchant_card_designs") \
+                .select("card_design").eq("merchant_id", mid).execute()
+            return res.data[0]["card_design"] if res.data else None
+        except Exception:
+            return None
+
+    def _fetch_last_scan():
+        try:
+            res = db.table("scan_history") \
+                .select("scanned_at").eq("card_id", card_id) \
+                .order("scanned_at", desc=True).limit(1).execute()
+            return res.data[0]["scanned_at"] if res.data else None
+        except Exception:
+            return None
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        f_m = pool.submit(_fetch_merchant)
+        f_d = pool.submit(_fetch_design)
+        f_s = pool.submit(_fetch_last_scan)
+        card["merchants"]    = f_m.result()
+        card["card_design"]  = f_d.result()
+        card["last_scan_at"] = f_s.result()
+
+    return card
+
 @router.get("/qr/{card_id}")
 def get_dynamic_qr(card_id: str, user=Depends(get_current_user)):
     # Vérifier que la carte appartient bien à ce client
