@@ -1,5 +1,6 @@
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends, Query, UploadFile, File
 from pydantic import BaseModel
+from typing import Optional, Dict
 from app.database import supabase, db
 from app.dependencies import get_current_user
 import uuid
@@ -73,6 +74,9 @@ class MerchantInfo(BaseModel):
     opening_days: str = ""    # ex: "Lun,Mar,Mer,Jeu,Ven"
     opening_hours: str = ""   # ex: "11:30-22:00"
     description: str = ""
+    category: Optional[str] = None
+    day_hours: Optional[Dict[str, str]] = None  # ex: {"Lun": "09:00-12:00/14:00-18:00"}
+    logo_url: Optional[str] = None
 
 
 @router.post("/me/info")
@@ -94,8 +98,32 @@ def update_merchant_info(data: MerchantInfo, user=Depends(get_current_user)):
         "opening_hours": data.opening_hours,
         "description": data.description.strip(),
     }
+    if data.category is not None:
+        fields["category"] = data.category
+    if data.day_hours is not None:
+        fields["day_hours"] = data.day_hours
+    if data.logo_url is not None:
+        fields["logo_url"] = data.logo_url
     res = db.table("merchants").update(fields).eq("id", user["sub"]).execute()
     return res.data[0]
+
+
+@router.post("/me/logo")
+async def upload_merchant_logo(file: UploadFile = File(...), user=Depends(get_current_user)):
+    """Upload le logo du commerçant vers Supabase Storage."""
+    if user["user_type"] != "merchant":
+        raise HTTPException(status_code=403, detail="Réservé aux commerçants")
+    contents = await file.read()
+    if len(contents) > 2 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Fichier trop grand (max 2MB)")
+    ext = (file.filename or "logo.jpg").rsplit(".", 1)[-1].lower()
+    if ext not in ("jpg", "jpeg", "png", "webp"):
+        raise HTTPException(status_code=400, detail="Format non supporté (jpg/png/webp)")
+    path = f"logos/{user['sub']}.{ext}"
+    supabase.storage.from_("merchants").upload(path, contents, {"content-type": file.content_type, "upsert": "true"})
+    public_url = supabase.storage.from_("merchants").get_public_url(path)
+    db.table("merchants").update({"logo_url": public_url}).eq("id", user["sub"]).execute()
+    return {"logo_url": public_url}
 
 
 class CardDesignPayload(BaseModel):

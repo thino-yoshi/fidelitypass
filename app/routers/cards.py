@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends, Query
 from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel
+from datetime import datetime, timedelta, timezone
 from app.database import supabase, db, SECRET_KEY
 from app.dependencies import get_current_user
 from jose import jwt
@@ -20,7 +21,14 @@ def _ts(v) -> str:
     if v is None:
         return ""
     return v.isoformat() if hasattr(v, "isoformat") else str(v)
-from datetime import datetime, timedelta, timezone
+
+def _day(v) -> str:
+    """Extrait YYYY-MM-DD d'un timestamp (datetime Python ou string ISO)."""
+    if v is None:
+        return ""
+    if hasattr(v, "strftime"):
+        return v.strftime("%Y-%m-%d")
+    return str(v)[:10]
 
 router = APIRouter(tags=["Cards"])
 
@@ -305,17 +313,37 @@ def get_scan_history(user=Depends(get_current_user)):
         .limit(50)\
         .execute()
 
-    results = []
+    # Cache clients pour éviter N+1
+    client_cache: dict = {}
     for scan in res.data:
-        client_res = db.table("users")\
-            .select("name, email")\
-            .eq("id", scan["client_id"])\
-            .execute()
-        client = client_res.data[0] if client_res.data else {}
-        scan["client"] = client
-        results.append(scan)
+        cid = scan.get("client_id")
+        if cid and cid not in client_cache:
+            r = db.table("users").select("name, email, profile_picture_url").eq("id", cid).execute()
+            client_cache[cid] = r.data[0] if r.data else {}
 
-    return results
+    # Calcul delta : différence de tampons entre scans consécutifs de la même carte
+    # On trie par ordre croissant pour calculer, puis on remet en décroissant
+    scans_asc = sorted(res.data or [], key=lambda x: x.get("scanned_at") or "")
+    prev_by_card: dict = {}
+    merchant_res = db.table("merchants").select("stamps_required, program_type, points_required").eq("user_id", user["sub"]).execute()
+    merchant_info = merchant_res.data[0] if merchant_res.data else {}
+    stamps_required = merchant_info.get("stamps_required") or 10
+    program_type = merchant_info.get("program_type") or "stamps"
+
+    for scan in scans_asc:
+        cid = scan.get("card_id")
+        curr = scan.get("stamps_count") or 0
+        prev = prev_by_card.get(cid, 0)
+        if scan.get("reward_reached"):
+            delta = max(1, (stamps_required - prev) + curr)
+        else:
+            delta = max(1, curr - prev) if curr > prev else 1
+        scan["delta"] = delta
+        scan["client"] = client_cache.get(scan.get("client_id", ""), {})
+        scan["program_type"] = program_type
+        prev_by_card[cid] = curr
+
+    return sorted(res.data or [], key=lambda x: x.get("scanned_at") or "", reverse=True)
 
 @router.get("/clients")
 def get_merchant_clients(user=Depends(get_current_user), limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)):
@@ -495,7 +523,7 @@ def export_clients_csv(user=Depends(get_current_user)):
         client_res = db.table("users").select("name, email").eq("id", card["client_id"]).execute()
         client = client_res.data[0] if client_res.data else {}
         stamps = card["stamps_count"]
-        created = card.get("created_at", "")[:10] if card.get("created_at") else ""
+        created = _day(card.get("created_at"))
         writer.writerow([
             client.get("name", ""),
             client.get("email", ""),
@@ -527,24 +555,27 @@ def get_daily_stats(user=Depends(get_current_user)):
         .gte("scanned_at", since)\
         .execute()
 
-    # Récompenses utilisées (redeemed) par jour — pas les atteintes non utilisées
+    # Récompenses utilisées (redeemed) par jour
     reward_res = db.table("rewards")\
         .select("redeemed_at")\
         .eq("merchant_id", user["sub"])\
+        .not_.is_("redeemed_at", "null")\
         .gte("redeemed_at", since)\
         .execute()
 
     daily: dict = {}
     for scan in (scan_res.data or []):
-        day = scan["scanned_at"][:10]
+        day = _day(scan.get("scanned_at"))
+        if not day:
+            continue
         if day not in daily:
             daily[day] = {"scans": 0, "rewards": 0}
         daily[day]["scans"] += 1
 
     for reward in (reward_res.data or []):
-        if not reward.get("redeemed_at"):
+        day = _day(reward.get("redeemed_at"))
+        if not day:
             continue
-        day = reward["redeemed_at"][:10]
         if day not in daily:
             daily[day] = {"scans": 0, "rewards": 0}
         daily[day]["rewards"] += 1

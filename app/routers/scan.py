@@ -87,6 +87,85 @@ def resolve_qr(request: Request, data: ResolveRequest, user=Depends(get_current_
         "program_type":     program_type,
     }
 
+class QuickStampRequest(BaseModel):
+    qr_token: str
+    delta: int = 1
+
+
+@router.post("/quick-stamp")
+@limiter.limit("120/minute")
+def quick_stamp(request: Request, data: QuickStampRequest, user=Depends(get_current_user)):
+    """Résout le QR ET ajoute immédiatement le tampon en un seul appel (mode scan rapide)."""
+    if user["user_type"] != "merchant":
+        raise HTTPException(status_code=403, detail="Réservé aux commerçants")
+    if data.delta == 0 or data.delta < 0 or data.delta > 20:
+        raise HTTPException(status_code=400, detail="delta invalide (1–20)")
+
+    # 1. Décoder le QR
+    decoded = None
+    try:
+        decoded = jwt.decode(data.qr_token, SECRET_KEY, algorithms=["HS256"])
+    except JWTError:
+        pass
+
+    if decoded and decoded.get("type") == "reward":
+        raise HTTPException(status_code=400, detail="QR de récompense — utiliser /scan/resolve")
+
+    real_qr_token = decoded.get("qr_token", data.qr_token) if decoded else data.qr_token
+    res = db.table("loyalty_cards").select("*").eq("qr_token", real_qr_token).execute()
+    if not res.data:
+        raise HTTPException(status_code=404, detail="QR code invalide ou expiré")
+    card = res.data[0]
+    if card["merchant_id"] != user["sub"]:
+        raise HTTPException(status_code=403, detail="Cette carte n'appartient pas à votre commerce")
+
+    # 2. Infos commerçant + client
+    merchant = db.table("merchants").select("stamps_required, points_required, reward_description, program_type").eq("id", user["sub"]).execute().data[0]
+    client_res = db.table("users").select("name, email, profile_picture_url").eq("id", card["client_id"]).execute()
+    client = client_res.data[0] if client_res.data else {}
+
+    program_type = merchant.get("program_type") or "stamps"
+    reward_desc = merchant.get("reward_description") or "Récompense"
+    if program_type == "points":
+        count_field = "points_count"
+        required = merchant.get("points_required") or 100
+    else:
+        count_field = "stamps_count"
+        required = merchant.get("stamps_required") or 10
+
+    # 3. Ajout tampon
+    new_total = (card.get(count_field) or 0) + data.delta
+    reward_reached = new_total >= required
+    completions = 0
+    if reward_reached:
+        completions = new_total // required
+        new_count = new_total % required
+        reward_rows = [{"client_id": card["client_id"], "merchant_id": user["sub"], "description": reward_desc} for _ in range(completions)]
+        if reward_rows:
+            db.table("rewards").insert(reward_rows).execute()
+    else:
+        new_count = min(new_total, required)
+
+    db.table("loyalty_cards").update({count_field: new_count}).eq("id", card["id"]).execute()
+    db.table("scan_history").insert({
+        "merchant_id": user["sub"], "client_id": card["client_id"], "card_id": card["id"],
+        "stamps_count": new_count, "reward_reached": reward_reached, "manual": False,
+    }).execute()
+
+    return {
+        "success": True,
+        "kind": "stamp",
+        "card_id": card["id"],
+        "client_name": client.get("name") or client.get("email") or "Client",
+        "profile_picture_url": client.get("profile_picture_url"),
+        "stamps_count": new_count,
+        "stamps_required": required,
+        "reward_reached": reward_reached,
+        "rewards_earned": completions,
+        "program_type": program_type,
+    }
+
+
 @router.post("/")
 @limiter.limit("60/minute")
 def scan_qr(request: Request, data: ScanRequest, user=Depends(get_current_user)):
